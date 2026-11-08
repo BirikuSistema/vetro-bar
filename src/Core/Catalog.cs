@@ -251,7 +251,9 @@ namespace Launcher.Core
                 if (e.Slug == "samsunghome") { home = e; continue; }
                 if (tv == null && IsTv(e))
                 {
-                    tv = new AppEntry("livetv", e.Label == "Live TV" ? "TV" : e.Label, Design.TdtAppId, e.FallbackAppId, null, -1, null, false, e.IconPath, e.KillFirst);
+                    // Source 0 is the tuner. Launching an app alone leaves HDMI where it is,
+                    // because tv-viewer is already on screen. The TDT app is tried after the switch.
+                    tv = new AppEntry("livetv", e.Label == "Live TV" ? "TV" : e.Label, Design.TdtAppId, null, null, 0, null, false, null, null);
                     continue;
                 }
                 if (IsTv(e)) continue;

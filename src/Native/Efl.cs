@@ -82,6 +82,7 @@ namespace Launcher.Native
         [DllImport(Evas)] public static extern void evas_object_text_text_set(IntPtr txt, string text);
         [DllImport(Evas)] public static extern int evas_object_text_horiz_advance_get(IntPtr txt);
         [DllImport(Evas)] public static extern int evas_object_text_vert_advance_get(IntPtr txt);
+        [DllImport(Evas)] public static extern int evas_object_text_ascent_get(IntPtr txt);
         [DllImport(Evas)] public static extern void evas_object_text_style_set(IntPtr txt, int style);
         [DllImport(Evas)] public static extern void evas_object_text_shadow_color_set(IntPtr txt, int r, int g, int b, int a);
         /// <summary>EVAS_TEXT_STYLE_SOFT_SHADOW: the ninth value of the enum (PLAIN, SHADOW, OUTLINE, SOFT_OUTLINE, GLOW, OUTLINE_SHADOW, FAR_SHADOW, OUTLINE_SOFT_SHADOW, SOFT_SHADOW).</summary>

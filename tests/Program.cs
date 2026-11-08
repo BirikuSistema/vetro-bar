@@ -81,7 +81,7 @@ namespace Launcher.Tests
                 T.Eq(bar.Length, 4, "tv + app + settings + home");
                 T.Eq(bar[0].AppId, Design.TdtAppId, "TV launches TDT");
                 T.Eq(bar[0].Label, "TV", "Live TV is labelled TV");
-                T.Eq(bar[0].SourceType, -1, "TV is an app launch, not a source switch");
+                T.Eq(bar[0].SourceType, 0, "TV switches the tuner, so HDMI does not stay");
                 T.Eq(bar[1].Slug, "netflix", "apps follow the TV pin");
                 T.Eq(bar[2].Slug, "settings", "settings stay on the right");
                 T.Eq(bar[3].Slug, "samsunghome", "home stays on the right");
@@ -100,14 +100,19 @@ namespace Launcher.Tests
                 T.Eq(Weather.Icon, "rain", "code 61 is rain");
                 T.True(Weather.Apply("{\"current\":{\"temperature_2m\":0.4,\"weather_code\":71}}"), "snow");
                 T.Eq(Weather.Icon, "snow", "code 71 is snow");
+                T.True(Weather.Apply("{\"current_units\":{\"temperature_2m\":\"C\",\"weather_code\":\"wmo code\"},\"current\":{\"temperature_2m\":15.7,\"weather_code\":2}}"), "Open-Meteo units key is not the reading");
+                T.Eq(Weather.Text, "16\u00b0", "numeric current value wins");
+                T.Eq(Weather.Icon, "cloud-sun", "code 2 is cloud-sun");
+                T.True(Weather.Apply("{\"current\":{\"temperature_2m\":15.7,\"weather_code\":2},\"daily\":{\"temperature_2m_min\":[8.2],\"temperature_2m_max\":[18.6]}}"), "daily range");
+                T.Eq(Weather.Span, "M\u00edn: 8\u00b0   M\u00e1x: 19\u00b0", "low then high");
                 T.True(!Weather.Apply(""), "empty json is ignored");
                 T.True(!Weather.Apply("{\"foo\":1}"), "missing temperature is ignored");
             });
 
             T.Run("layout: overlay TV pin, stacked icon pins, full-width chrome", () =>
             {
-                T.Eq(DockLayout.PinW, 56, "icon-only pins are square");
-                T.Eq(DockLayout.PinH, 56, "and the same height");
+                T.Eq(2 * DockLayout.PinH + DockLayout.PillItemGap, DockLayout.Icon, "settings and home together match one app tile");
+                T.Eq(DockLayout.PinW, DockLayout.PinH, "each pin is square");
                 var l = new DockLayout(6, 1920, 1080, 0, false, 4, 1, true);
                 T.Eq(l.WinW, 1920, "window spans the screen so weather and clock sit outside the pill");
                 T.Eq(l.WinX, 0, "flush with the screen");
@@ -120,8 +125,14 @@ namespace Launcher.Tests
                 var tv = l.IconBox(0, 0f, 0f, 0);
                 var app = l.IconBox(1, 1f, 0f, 0);
                 T.True(d.X >= tv.X + tv.W && d.X + d.W <= app.X, "left divider between TV and the first app");
-                T.Eq(l.WeatherLeft, 48, "weather inset from the left");
-                T.Eq(l.ClockRightEdge, 1920 - 48, "clock inset from the right");
+                T.Eq(tv.W, DockLayout.Icon, "TV tile is the same size as an app at rest");
+                T.Eq(tv.H, DockLayout.Icon, "TV tile is square");
+                T.Eq(l.IconBox(4, 4f, 0f, 0).W, DockLayout.PinW, "settings is one half of the stack");
+                var home = l.IconBox(5, 5f, 0f, 0);
+                var gear = l.IconBox(4, 4f, 0f, 0);
+                T.Eq(home.Y + home.H - gear.Y, DockLayout.Icon, "the two pins span one app tile");
+                T.Eq(l.WeatherMid, l.Left / 2, "weather centred in the left gap");
+                T.Eq(l.ClockMid, (l.Left + l.PillW + l.WinW) / 2, "clock centred in the right gap");
                 var nav = new Controller(l);
                 nav.Show(); int ni;
                 T.Eq(nav.Key("Right", out ni), KeyAction.Moved, "right leaves TV"); T.Eq(nav.FocusTarget, 1, "first app");
@@ -377,7 +388,7 @@ namespace Launcher.Tests
                 T.True(l.WinW < 1920 && l.WinH < 330, "window much smaller than the screen: " + l.WinW + "x" + l.WinH);
                 T.Eq(l.WinH, l.PillH + 2 * DockLayout.Margin + DockLayout.HintH, "window = pill + shadow margins + hint band");
                 T.Eq(l.WinX, (1920 - l.WinW) / 2, "centred");
-                T.Eq(l.WinY + l.WinH + DockLayout.BottomGap, 1080, "sits at the bottom");
+                T.Eq(l.WinY + l.WinH + DockLayout.BottomGap, 1080 + DockLayout.DockLower, "sits a little lower than the screen edge");
                 T.True(!l.Scrolls, "11 apps fit without scrolling");
                 T.Eq(l.ViewportW, l.ContentW, "viewport == content when it fits");
             });
@@ -744,7 +755,7 @@ namespace Launcher.Tests
                 var apps = new DockLayout(13, 1920, 1080);
                 var panel = new DockLayout(5, 1920, 1080, apps.WinW, true, -1);
                 int pillTopScreen = apps.WinY + apps.Top;
-                T.Eq(pillTopScreen, 1080 - DockLayout.BottomGap - DockLayout.Margin - apps.PillH, "apps pill keeps its distance from the screen bottom");
+                T.Eq(pillTopScreen, 1080 - DockLayout.BottomGap - DockLayout.Margin - apps.PillH + DockLayout.DockLower, "apps pill keeps its distance from the screen bottom");
                 T.Eq(panel.WinH, apps.WinH, "both pages share the window height");
                 T.Eq(panel.WinY, apps.WinY, "and its position");
                 T.Eq(apps.Top - panel.Top, DockLayout.HintH, "the panel pill sits one hint band higher");
@@ -798,12 +809,13 @@ namespace Launcher.Tests
                 T.Eq(new DockLayout(5, 1920, 1080, 0, false, -3).GroupStart, -1, "negative is no group");
                 T.True(!l.IsPinned(7) && l.IsPinned(8) && l.IsPinned(9), "the system entries after the divider are the pills");
                 T.Eq(l.IconBox(8, 8f, 0f, 0).W, DockLayout.PinW, "a focused pill does not grow");
-                T.Eq(l.GlowBox(8, 0f, 0).W, DockLayout.PinW + 2 * DockLayout.PillGlowPad, "its glow is the capsule size");
+                T.Eq(l.GlowBox(8, 0f, 0).W, DockLayout.PinW + 2 * DockLayout.PinGlowPad, "its glow fits the small pin");
+                T.True(DockLayout.PinGlowPad < DockLayout.HighlightPad / 2, "a pin glow is much tighter than an app glow");
                 var p1 = l.IconBox(8, 0f, 0f, 0); var p2 = l.IconBox(9, 0f, 0f, 0);
                 T.Eq(p1.X, p2.X, "the pills are one column");
                 T.Eq(p2.Y - (p1.Y + p1.H), DockLayout.PillItemGap, "stacked with the small gap");
                 T.Eq((p1.Y + p2.Y + p2.H) / 2, l.RowCenterY, "the stack is centred on the icon row");
-                T.True(p1.Y >= l.Top + DockLayout.PadTop - 20 && p2.Y + p2.H <= l.Top + DockLayout.PadTop + DockLayout.FocusIcon + 20, "inside the icon row band");
+                T.True(p1.Y >= l.Top + DockLayout.PadTop - 20 && p2.Y + p2.H <= l.Top + DockLayout.PadTop + l.RowH + 20, "inside the icon row band");
                 T.Eq(l.PinnedW, DockLayout.PinW, "the pinned group is as wide as one pill");
                 var nav = new Controller(l) { PanelEnabled = true };
                 nav.Show(); int ni;
@@ -1013,13 +1025,14 @@ namespace Launcher.Tests
                 T.Eq(g.Y + g.H / 2, l.RowCenterY - Design.Lift, "the glow rises with it");
                 var pill = l.IconBox(9, 9f, 0f, 0);
                 T.Eq(pill.Y, l.PillTop(9), "a selected pill does not rise");
-                T.Eq(l.PillH, DockLayout.PadTop + DockLayout.FocusIcon + DockLayout.LabelRow + DockLayout.PadBottom, "bar height");
+                T.Eq(l.PillH, DockLayout.PadTop + l.RowH + DockLayout.LabelRow + DockLayout.PadBottom, "bar height");
+                T.Eq(l.RowH, DockLayout.FocusIcon, "a short pin stack does not shrink the app row");
                 if (!Design.ShowLabels && !Design.ShowClock) T.Eq(DockLayout.LabelRow, 0, "no names, no clock: no row for them");
                 T.Eq(l.PillW <= DockLayout.MaxPillW ? 1 : 0, 1, "the bar never exceeds the maximum width");
                 T.Eq(new DockLayout(40, 1920, 1080, 0, false, 38).PillW, DockLayout.MaxPillW, "a long row fills the maximum width");
-                T.Eq(l.WinY + l.WinH, 1080 - DockLayout.BottomGap, "the window ends at the bottom");
-                T.Eq(1080 - (l.WinY + l.Top + l.PillH), DockLayout.Margin + DockLayout.BottomGap, "the bar's bottom edge is Margin + BottomGap above the screen bottom");
-                T.Eq(DockLayout.Margin + DockLayout.BottomGap, 40, "the designer's distance from the edge");
+                T.Eq(l.WinY + l.WinH, 1080 - DockLayout.BottomGap + DockLayout.DockLower, "the window ends just past the bottom");
+                T.Eq(1080 - (l.WinY + l.Top + l.PillH), DockLayout.Margin + DockLayout.BottomGap - DockLayout.DockLower, "the bar sits a little lower, still clear of the edge");
+                T.Eq(DockLayout.Margin + DockLayout.BottomGap - DockLayout.DockLower, 24, "the gap under the bar");
             });
 
             T.Run("controller: the cascade brings the items in one after the other", () =>
@@ -1027,6 +1040,7 @@ namespace Launcher.Tests
                 DockLayout l; var c = NewController(6, out l);
                 T.True(c.Show(), "show");
                 T.Eq(c.ItemPresence(0), 0f, "nothing has come in yet");
+                T.Eq(c.SideShift, Design.SideEnter, "clock and weather start out at the sides");
                 Run(c, Controller.ShowSeconds / 2);
                 T.True(c.Presence > 0.45f && c.Presence < 0.55f, "the bar fades in over the enter time");
                 T.Eq(c.Slide, 0, "the bar does not slide while the cascade runs");
@@ -1040,6 +1054,7 @@ namespace Launcher.Tests
                 int guard = 0; while (c.Tick(1 / 60.0) && guard++ < 200) { }
                 T.Eq(c.Phase, Phase.Shown, "shown once the last item landed");
                 for (int i = 0; i < 6; i++) { T.Eq(c.ItemPresence(i), 1f, "item " + i + " in"); T.Eq(c.ItemSlide(i), 0, "item " + i + " in place"); }
+                T.Eq(c.SideShift, 0, "clock and weather have arrived from the sides");
                 // hiding is uniform: every item follows the bar's presence
                 c.Hide(); Run(c, Controller.HideSeconds / 2);
                 for (int i = 0; i < 6; i++) T.Eq(c.ItemPresence(i), c.Presence, "hide: item " + i + " follows the bar");

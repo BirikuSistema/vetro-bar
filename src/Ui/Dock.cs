@@ -15,6 +15,7 @@ namespace Launcher.Ui
     internal sealed class Dock
     {
         private const string Font = "SamsungOneUI 500,Sans";
+        private const string ChromeFont = Design.SideChromeFont;
 
         private readonly IntPtr _win, _evas;
         private readonly DockLayout _layout;
@@ -23,10 +24,13 @@ namespace Launcher.Ui
         private readonly Action<string> _log;
 
         private IntPtr _shadow, _pill, _clip, _appsClip, _highlight, _highlight2, _ring, _ring2, _clock, _divider, _dividerLeft;
-        private IntPtr _sideClock, _weatherText, _weatherIcon;
+        private IntPtr _sideClock, _day, _weatherText, _weatherSpan, _weatherIcon;
+        private IntPtr _clockPill, _weatherPill;
         private int _sideClockW, _sideClockX = int.MinValue, _sideClockY = int.MinValue, _sideClockAlpha = -1;
         private int _weatherW, _weatherX = int.MinValue, _weatherY = int.MinValue, _weatherAlpha = -1;
-        private string _weatherShown;
+        private string _weatherShown, _spanShown, _iconShown, _dayShown;
+        private int _dayW, _dayX = int.MinValue, _dayY = int.MinValue, _spanW, _tempAscent;
+        private Box _clockPillBox, _weatherPillBox;
         private Box _dividerLeftBox;
         // Two name labels cross-fade (see LabelFader): the name under the icon being left and the one being reached.
         private readonly IntPtr[] _label = new IntPtr[2];
@@ -73,6 +77,7 @@ namespace Launcher.Ui
             _glowRgb = new int[items.Length];
             for (int i = 0; i < items.Length; i++) { _iconBox[i].W = -1; _iconAlpha[i] = -1; _glowRgb[i] = Design.GlowColor; }
             _shadowBox.W = _pillBox.W = _hlBox.W = _hlBox2.W = _ringBox.W = _ringBox2.W = -1;
+            _clockPillBox.W = _weatherPillBox.W = -1;
         }
 
         public IntPtr Evas { get { return _evas; } }
@@ -200,7 +205,7 @@ namespace Launcher.Ui
         /// </summary>
         public void SetVisible(bool visible)
         {
-            IntPtr[] top = { _shadow, _pill, _clip, _label[0], _label[1], _clock, _sideClock, _weatherText, _weatherIcon, _hintChev, _hintText };
+            IntPtr[] top = { _shadow, _pill, _clip, _label[0], _label[1], _clock, _clockPill, _sideClock, _day, _weatherPill, _weatherText, _weatherSpan, _weatherIcon, _hintChev, _hintText };
             foreach (IntPtr o in top)
             {
                 if (o == IntPtr.Zero) continue;
@@ -225,74 +230,167 @@ namespace Launcher.Ui
             }
             if (_sideClock != IntPtr.Zero)
             {
-                Efl.evas_object_text_text_set(_sideClock, text);
-                _sideClockW = Efl.evas_object_text_horiz_advance_get(_sideClock);
+                _sideClockW = FitLine(_sideClock, text, SideInner(), Design.SideChromeSize);
                 _sideClockX = int.MinValue;
             }
         }
 
+        public void SetDay(string text)
+        {
+            if (_day == IntPtr.Zero || text == _dayShown) return;
+            _dayShown = text;
+            _dayW = FitLine(_day, text, SideInner(), Design.SideSubSize);
+            _dayX = int.MinValue;
+            _dayY = int.MinValue;
+        }
+
+        /// <summary>Widest the words inside a side pill may be: the gap, minus air at the screen and at the bar, minus the pill's own padding.</summary>
+        int SideInner()
+        {
+            int left = _layout.Left;
+            int right = _layout.WinW - _layout.Left - _layout.PillW;
+            int gap = left < right ? left : right;
+            int inner = gap - 32 - 2 * DockLayout.PadX;
+            return inner > 48 ? inner : 48;
+        }
+
+        /// <summary>Sets the line and shrinks it from <paramref name="maxSize"/> until it fits.</summary>
+        int FitLine(IntPtr text, string value, int room, int maxSize)
+        {
+            int size = maxSize;
+            Efl.evas_object_text_font_set(text, ChromeFont, size);
+            Efl.evas_object_text_text_set(text, value ?? "");
+            if (string.IsNullOrEmpty(value) || room < 1) return 0;
+            int w = Efl.evas_object_text_horiz_advance_get(text);
+            while (w > room && size > 18)
+            {
+                size--;
+                Efl.evas_object_text_font_set(text, ChromeFont, size);
+                w = Efl.evas_object_text_horiz_advance_get(text);
+            }
+            return w;
+        }
+
+        static Box SidePillBox(int x, int y, int w, int h)
+        {
+            Box b; b.X = x; b.Y = y; b.W = w; b.H = h; return b;
+        }
+
         void BuildSideChrome()
         {
+            int size = Design.SideChromeSize;
+            _clockPill = NineSlice("dock_bg", Design.ShellSlice);
+            _weatherPill = NineSlice("dock_bg", Design.ShellSlice);
+
             _sideClock = Efl.evas_object_text_add(_evas);
-            Efl.evas_object_text_font_set(_sideClock, Font, Design.SideChromeSize);
+            Efl.evas_object_text_font_set(_sideClock, ChromeFont, size);
             Efl.evas_object_text_text_set(_sideClock, "--:--");
             _sideClockW = Efl.evas_object_text_horiz_advance_get(_sideClock);
-            SoftShadow(_sideClock);
             Efl.evas_object_show(_sideClock);
 
+            _day = Efl.evas_object_text_add(_evas);
+            Efl.evas_object_text_font_set(_day, ChromeFont, Design.SideSubSize);
+            Efl.evas_object_text_text_set(_day, "");
+            Efl.evas_object_show(_day);
+
             _weatherText = Efl.evas_object_text_add(_evas);
-            Efl.evas_object_text_font_set(_weatherText, Font, Design.SideChromeSize);
+            Efl.evas_object_text_font_set(_weatherText, ChromeFont, size);
             Efl.evas_object_text_text_set(_weatherText, "");
-            SoftShadow(_weatherText);
             Efl.evas_object_show(_weatherText);
+
+            _weatherSpan = Efl.evas_object_text_add(_evas);
+            Efl.evas_object_text_font_set(_weatherSpan, ChromeFont, Design.SideSubSize);
+            Efl.evas_object_text_text_set(_weatherSpan, "");
+            Efl.evas_object_show(_weatherSpan);
 
             _weatherIcon = Efl.evas_object_image_add(_evas);
             Efl.evas_object_image_filled_set(_weatherIcon, true);
             Efl.evas_object_image_smooth_scale_set(_weatherIcon, true);
-            Efl.evas_object_resize(_weatherIcon, 72, 72);
+            Efl.evas_object_resize(_weatherIcon, size, size);
             Efl.evas_object_show(_weatherIcon);
         }
 
-        void ApplySideChrome(int slide, int presence)
+        void ApplySideChrome(int presence, int side)
         {
-            int y = _layout.RowCenterY - Design.SideChromeSize / 2 + slide;
-            int cx = _layout.ClockRightEdge - _sideClockW;
+            int size = Design.SideChromeSize;
+            int lineGap = Design.SideSubGap;
+            int pillH = _layout.PillH;
+            int pillY = _layout.Top;
+            // The em box has empty space above the capitals, so centring the boxes leaves the ink on the floor of the pill.
+            int clockAscent = Efl.evas_object_text_ascent_get(_sideClock);
+            int dayAscent = Efl.evas_object_text_ascent_get(_day);
+            if (clockAscent <= 0) clockAscent = size * 952 / 1024;
+            if (dayAscent <= 0) dayAscent = Design.SideSubSize * 952 / 1024;
+            int topPad = clockAscent - clockAscent * 724 / 952;
+            int visualBottom = size + lineGap + dayAscent + dayAscent * 276 / 952;
+            int y = pillY + (pillH - (visualBottom - topPad)) / 2 - topPad;
+            int subY = y + size + lineGap;
+
+            string w = Weather.Text;
+            string icon = Weather.Icon;
+            string span = Weather.Span;
+            bool have = !string.IsNullOrEmpty(w);
+            if (w != _weatherShown || span != _spanShown || icon != _iconShown)
+            {
+                _weatherShown = w;
+                _spanShown = span;
+                _iconShown = icon;
+                _weatherW = have ? FitLine(_weatherText, w, SideInner() - size - 12, size) : 0;
+                _tempAscent = Efl.evas_object_text_ascent_get(_weatherText);
+                _spanW = FitLine(_weatherSpan, span, SideInner(), Design.SideSubSize);
+                string path = Path.Combine(_assets, "weather", (icon ?? "cloud") + ".png");
+                if (File.Exists(path)) Efl.evas_object_image_file_set(_weatherIcon, path, null);
+                _weatherX = int.MinValue;
+            }
+
+            int iconGap = 12;
+            int group = have ? size + iconGap + _weatherW : 0;
+            int pillW = Math.Max(Math.Max(_sideClockW, _dayW), Math.Max(group, _spanW)) + 2 * DockLayout.PadX;
+            int clockX = _layout.ClockMid - pillW / 2 + side;
+            Place(_clockPill, ref _clockPillBox, SidePillBox(clockX, pillY, pillW, pillH));
+            int cx = clockX + (pillW - _sideClockW) / 2;
+            int dx = clockX + (pillW - _dayW) / 2;
             if (cx != _sideClockX || y != _sideClockY)
             {
                 _sideClockX = cx; _sideClockY = y;
                 Efl.evas_object_move(_sideClock, cx, y);
             }
+            if (dx != _dayX || subY != _dayY)
+            {
+                _dayX = dx;
+                _dayY = subY;
+                Efl.evas_object_move(_day, dx, subY);
+            }
             if (presence != _sideClockAlpha)
             {
                 _sideClockAlpha = presence;
-                TintText(_sideClock, presence);
+                Tint(_clockPill, presence);
+                Tint(_sideClock, presence);
+                Tint(_day, presence * 8 / 10);
             }
 
-            string w = Weather.Text;
-            string icon = Weather.Icon;
-            bool have = !string.IsNullOrEmpty(w);
-            if (w != _weatherShown)
-            {
-                _weatherShown = w;
-                Efl.evas_object_text_text_set(_weatherText, w ?? "");
-                _weatherW = have ? Efl.evas_object_text_horiz_advance_get(_weatherText) : 0;
-                string path = Path.Combine(_assets, "weather", (icon ?? "cloud") + ".png");
-                if (File.Exists(path)) Efl.evas_object_image_file_set(_weatherIcon, path, null);
-                _weatherX = int.MinValue;
-            }
             int a = have ? presence : 0;
-            int wx = _layout.WeatherLeft;
+            int pillX = _layout.WeatherMid - pillW / 2 - side;
+            Place(_weatherPill, ref _weatherPillBox, SidePillBox(pillX, pillY, pillW, pillH));
+            int wx = pillX + (pillW - group) / 2;
+            // The digits sit on the baseline, under the accent space. Samsung One's cap is about 0.71 of the em.
+            int ascent = _tempAscent > 0 ? _tempAscent : size * 74 / 80;
+            int iconY = y + (ascent - size * 36 / 100) - size / 2;
             if (wx != _weatherX || y != _weatherY)
             {
                 _weatherX = wx; _weatherY = y;
-                Efl.evas_object_move(_weatherIcon, wx, y - 8);
-                Efl.evas_object_move(_weatherText, wx + 80, y);
+                Efl.evas_object_move(_weatherIcon, wx, iconY);
+                Efl.evas_object_resize(_weatherIcon, size, size);
+                Efl.evas_object_move(_weatherText, wx + size + iconGap, y);
+                Efl.evas_object_move(_weatherSpan, pillX + (pillW - _spanW) / 2, subY);
             }
             if (a != _weatherAlpha)
             {
                 _weatherAlpha = a;
+                Tint(_weatherPill, a);
                 Tint(_weatherIcon, a);
-                TintText(_weatherText, a);
+                Tint(_weatherText, a);
+                Tint(_weatherSpan, a * 8 / 10);
             }
         }
 
@@ -536,19 +634,27 @@ namespace Launcher.Ui
             if (_divider != IntPtr.Zero)
             {
                 Place(_divider, ref _dividerBox, _layout.DividerBox(scroll, slide));
-                int da = (int)Math.Round(presence * Design.DividerAlpha);     // a hairline: felt more than seen
-                if (da != _dividerAlpha) { _dividerAlpha = da; Tint(_divider, da); }
+                int da = (int)Math.Round(presence * Design.DividerAlpha);
+                if (da != _dividerAlpha)
+                {
+                    _dividerAlpha = da;
+                    TintRgb(_divider, da, Design.DividerColor);
+                    if (_dividerLeft != IntPtr.Zero) TintRgb(_dividerLeft, da, Design.DividerColor);
+                }
             }
             if (_dividerLeft != IntPtr.Zero)
             {
                 Place(_dividerLeft, ref _dividerLeftBox, _layout.LeftDividerBox(slide));
-                int da = (int)Math.Round(presence * Design.DividerAlpha);
-                Tint(_dividerLeft, da);
+                if (_divider == IntPtr.Zero)
+                {
+                    int da = (int)Math.Round(presence * Design.DividerAlpha);
+                    if (da != _dividerAlpha) { _dividerAlpha = da; TintRgb(_dividerLeft, da, Design.DividerColor); }
+                }
             }
 
             if (Design.ShowLabels) ApplyLabels(c, slide, presence, scroll);
             if (Design.ShowClock) ApplyClock(slide, presence);
-            if (Design.SideChrome) ApplySideChrome(slide, presence);
+            if (Design.SideChrome) ApplySideChrome(presence, c.SideShift);
             if (_hintText != IntPtr.Zero) ApplyHint(slide, presence);
         }
 

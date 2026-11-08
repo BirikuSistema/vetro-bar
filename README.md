@@ -1,8 +1,6 @@
 # vetro-bar
 
-Overlay del dock nativo de [Vetro](https://github.com/) 0.5.0 para una Samsung QE55Q65AAUXXC (Tizen 6). No es un fork de Vetro: se construye la DLL del launcher y se copia encima de la instalación viva. Un update de Vetro se vuelve a aplicar con `apply.sh`.
-
-El dock original se conserva en `native/dock/.vetro-bar-stock/` la primera vez.
+Overlay del dock nativo de Vetro 0.5.0 para una Samsung QE55Q65AAUXXC (Tizen 6). No es un fork de Vetro: se construye la DLL del launcher y se copia encima de la instalación viva. Si Vetro se actualiza, `apply.sh` lo vuelve a dejar como ahora. `restore.sh` devuelve el dock que había antes de la primera aplicación.
 
 ## Qué cambia
 
@@ -35,15 +33,17 @@ dotnet run --project tests           # lógica pura, sin tele
 python3 -c "import sys; sys.path.insert(0,'tools'); import system_icons as s; s.render_all('res/icons')"
 ```
 
-## Overlay
+## Ponerlo y quitarlo
 
-Hace falta `sdb` (Tizen Studio) y Developer Mode con Host PC IP = tu Mac.
+No usa `sdb`. En esta tele el root por `sdb` está desactivado, y la IP del modo desarrollador tiene que seguir en `127.0.0.1` para que el agente de Vetro arranque. Los scripts hablan con ese agente (`http://192.168.4.32:8099`).
 
 ```sh
 export TV_IP=192.168.4.32            # opcional, ese es el valor por defecto
-sh apply.sh                          # backup stock + copia DLL e iconos + reinicia vetro-dock
+sh apply.sh                          # la primera vez guarda el dock de Vetro y luego pone este
 sh status.sh
-sh restore.sh                        # vuelve al dock de Vetro
+sh restore.sh                        # vuelve a esa copia original y reinicia el dock
 ```
 
-Tras un update de Vetro, vuelve a ejecutar `apply.sh`. Si Vetro sustituyó la DLL, el script no pisa el backup existente; si quieres un backup fresco del stock nuevo, borra `native/dock/.vetro-bar-stock/` en la tele y aplica otra vez.
+La copia original queda en la tele, en `native/dock/.vetro-bar-stock/`, al lado del dock que está en marcha. No se toca en las aplicaciones siguientes.
+
+Si una actualización de Vetro borra esa carpeta, el siguiente `apply.sh` guarda el Vetro nuevo y después pone este dock. Si la copia vieja sigue ahí y quieres que `restore.sh` vuelva al Vetro actualizado, borra `.vetro-bar-stock` en la tele y vuelve a ejecutar `apply.sh`. El icono de Steam no se copia: vive fuera de esta carpeta.

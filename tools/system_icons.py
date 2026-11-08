@@ -29,6 +29,24 @@ SYSTEM = {
 }
 
 
+# One flat dark blue for the TV, Settings and Home tiles.
+TILE_BLUE = (0x00, 0x5F, 0x73)
+
+
+def _flat_tile(rim=True):
+    """Same rounded tile as the apps, but one flat colour: no vertical gradient and no sheen."""
+    big = SIZE * SS
+    mask = Image.new("L", (big, big), 0)
+    ImageDraw.Draw(mask).rounded_rectangle((0, 0, big - 1, big - 1), radius=CORNER * SS, fill=255)
+    base = Image.new("RGBA", (big, big), TILE_BLUE + (255,))
+    if rim:
+        edge = Image.new("RGBA", (big, big), (0, 0, 0, 0))
+        ImageDraw.Draw(edge).rounded_rectangle((0, 0, big - 1, big - 1), radius=CORNER * SS, outline=(255, 255, 255, RIM_ALPHA), width=max(1, round(SIZE / OUT * SS)))
+        base = Image.alpha_composite(base, edge)
+    base.putalpha(ImageChops.multiply(base.getchannel("A"), mask))
+    return base
+
+
 def _tile(accent):
     big = SIZE * SS
     mask = Image.new("L", (big, big), 0)
@@ -104,13 +122,38 @@ def _glyph_back(d, c, acc):
 def _glyph_house(d, c, acc):
     s = SS
     d.polygon([
-        (64 * s, 22 * s), (114 * s, 66 * s), (100 * s, 66 * s),
-        (100 * s, 108 * s), (28 * s, 108 * s), (28 * s, 66 * s), (14 * s, 66 * s),
+        (64 * s, 24 * s), (108 * s, 64 * s), (96 * s, 64 * s),
+        (96 * s, 104 * s), (32 * s, 104 * s), (32 * s, 64 * s), (20 * s, 64 * s),
     ], fill=c)
-    d.rectangle((82 * s, 30 * s, 96 * s, 54 * s), fill=c)
+    d.rectangle((80 * s, 32 * s, 94 * s, 52 * s), fill=c)
     door = Image.new("L", (SIZE * SS, SIZE * SS), 0)
-    ImageDraw.Draw(door).rounded_rectangle((54 * s, 76 * s, 74 * s, 108 * s), radius=6 * s, fill=255)
+    ImageDraw.Draw(door).rounded_rectangle((54 * s, 74 * s, 74 * s, 104 * s), radius=6 * s, fill=255)
     return ("hole-mask", door)
+
+
+def _fit_filled(glyph, box):
+    """Crop a filled glyph to its ink and fit it in the same box as the Phosphor icons."""
+    def draw(d, c, acc):
+        layer = Image.new("RGBA", (SIZE * SS, SIZE * SS), (0, 0, 0, 0))
+        extra = glyph(ImageDraw.Draw(layer), c, acc)
+        if extra and extra[0] == "hole-mask":
+            layer.putalpha(ImageChops.subtract(layer.getchannel("A"), extra[1]))
+        elif extra and extra[0] == "hole":
+            _, cx, cy, r, _acc = extra
+            hole = Image.new("L", layer.size, 0)
+            ImageDraw.Draw(hole).ellipse((cx - r, cy - r, cx + r, cy + r), fill=255)
+            layer.putalpha(ImageChops.subtract(layer.getchannel("A"), hole))
+        bbox = layer.getchannel("A").getbbox()
+        if not bbox:
+            return ("image", layer)
+        g = layer.crop(bbox)
+        side = box * SS
+        k = min(side / g.width, side / g.height)
+        g = g.resize((max(1, round(g.width * k)), max(1, round(g.height * k))), Image.LANCZOS)
+        out = Image.new("RGBA", (SIZE * SS, SIZE * SS), (0, 0, 0, 0))
+        out.alpha_composite(g, ((SIZE * SS - g.width) // 2, (SIZE * SS - g.height) // 2))
+        return ("image", out)
+    return draw
 
 
 GLYPH_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "glyphs")
@@ -131,9 +174,10 @@ def _phosphor(name, box):
     return draw
 
 
-# The line glyphs above stay as a fallback; the shipped look uses Phosphor bold so all three share one hand.
+# TV, gear and house: filled silhouettes, same optical box, same dark tile as each other.
 GLYPH_HEIGHT = {"settings": 23, "samsunghome": 22}
-GLYPHS = {"settings": _phosphor("gear-six-bold", 62), "samsunghome": _glyph_house}
+GLYPH_BOX = 62
+GLYPHS = {"settings": _fit_filled(_glyph_settings, GLYPH_BOX), "samsunghome": _fit_filled(_glyph_house, GLYPH_BOX)}
 
 
 # The inputs panel: slug -> (label, Samsung SourceType, accent). TV is 0, HDMI 1-4 are 13-16.
@@ -243,7 +287,7 @@ def _pill_font(size):
 def render(slug, path):
     """A pinned system entry: square icon-only tile, or an oval labelled pill."""
     if layout_consts.design_bool("IconOnlyPins"):
-        _render(SYSTEM[slug][3], GLYPHS[slug], path)
+        _render(SYSTEM[slug][3], GLYPHS[slug], path, flat=True)
         return
     label = SYSTEM[slug][0]
     tile = _pill(PILL_W, PILL_H)
@@ -272,8 +316,8 @@ def render(slug, path):
     out.save(path)
 
 
-def _render(accent, glyph, path, round_control=False):
-    tile = _control() if round_control else _tile(accent)
+def _render(accent, glyph, path, round_control=False, flat=False):
+    tile = _control() if round_control else (_flat_tile() if flat else _tile(accent))
     layer = Image.new("RGBA", tile.size, (0, 0, 0, 0))
     d = ImageDraw.Draw(layer)
     extra = glyph(d, (255, 255, 255, 245), accent + (255,) if accent else None)
@@ -314,7 +358,38 @@ def render_live(slug, path):
     _render(LIVE[slug], _phosphor("television-simple-bold", 66), path)
 
 
-WEATHER_SIZE = 72
+def restamp_livetv(path):
+    """Keep the stock TV glyph and sit it on the same flat blue as Settings and Home."""
+    src = Image.open(path).convert("RGBA")
+    w, h = src.size
+    px = src.load()
+
+    def row_bg(y):
+        cols = []
+        for x in list(range(10, 24)) + list(range(w - 24, w - 10)):
+            r, g, b, a = px[x, y]
+            if a > 200 and (r + g + b) / 3.0 < 170:
+                cols.append((r + g + b) / 3.0)
+        return sum(cols) / len(cols) if cols else 50
+
+    glyph = Image.new("L", (w, h), 0)
+    gp = glyph.load()
+    margin = 18  # the old tile's light corner is not part of the TV glyph
+    for y in range(margin, h - margin):
+        bg = row_bg(y)
+        for x in range(margin, w - margin):
+            r, g, b, a = px[x, y]
+            lum = (r + g + b) / 3.0
+            if lum < bg + 36 or abs(r - g) > 40 or abs(g - b) > 55:
+                continue
+            gp[x, y] = max(0, min(255, int(round((lum - bg) / (255 - bg) * 255))))
+    tile = _flat_tile(rim=False).resize((w, h), Image.LANCZOS)
+    ink = Image.new("RGBA", (w, h), (255, 255, 255, 0))
+    ink.putalpha(glyph)
+    Image.alpha_composite(tile, ink).save(path)
+
+
+WEATHER_SIZE = 80   # same pixels the dock draws, so the shadow is not scaled again
 
 
 def _weather_base():
@@ -382,7 +457,12 @@ def render_weather(out_dir):
 
 def render_all(icons_dir):
     for slug in LIVE:
-        render_live(slug, os.path.join(icons_dir, slug + ".png"))
+        dest = os.path.join(icons_dir, slug + ".png")
+        # The TV tile keeps its original glyph; only the background is repainted.
+        if slug == "livetv":
+            restamp_livetv(dest)
+        else:
+            render_live(slug, dest)
     for slug in SYSTEM:
         render(slug, os.path.join(icons_dir, slug + ".png"))
     for slug in INPUTS:

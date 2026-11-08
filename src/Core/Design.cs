@@ -10,13 +10,13 @@ namespace Launcher.Core
     /// </summary>
     internal static class Design
     {
-        // ---- The bar (designer style "solid": opaque tint, thin light border, soft drop shadow) ----
+        // ---- The bar: a translucent tint, no light border, soft drop shadow ----
         public const int ShellRadius = 24;
-        public const int ShellColor = 0x2A3346;
-        public const float ShellAlpha = 0.98f;
-        public const int ShellBorderW = 2;
+        public const int ShellColor = 0x003049;
+        public const float ShellAlpha = 0.70f;
+        public const int ShellBorderW = 0;
         public const int ShellBorderColor = 0xFFFFFF;
-        public const float ShellBorderAlpha = 0.22f;
+        public const float ShellBorderAlpha = 0f;
         /// <summary>Nine-slice border of the bar image: more than its corner radius, so the curve is never stretched.</summary>
         public const int ShellSlice = 32;
         public const int ShadowBlur = 50;      // CSS blur radius: a Gaussian of sigma = blur / 2
@@ -47,7 +47,13 @@ namespace Launcher.Core
         public static readonly bool ShowClock = false;
         /// <summary>Clock and weather sit outside the pill, left and right, over the video.</summary>
         public static readonly bool SideChrome = true;
-        public const int SideChromeSize = 56;
+        public const int SideChromeSize = 80;
+        public const int SideSubSize = 26;
+        /// <summary>Air between the clock or the temperature and the small line under it.</summary>
+        public const int SideSubGap = 16;
+        /// <summary>How far the clock and the weather travel in from their own side as the dock appears.</summary>
+        public const int SideEnter = 96;
+        public const string SideChromeFont = "SamsungOneUI 700,Sans";
         public const string HintText = null;
 
         // ---- The two pills (overlay: square icons stacked, not labelled capsules) ----
@@ -61,11 +67,12 @@ namespace Launcher.Core
         public const double WeatherSeconds = 900;
 
         // ---- Divider ----
+        public const int DividerColor = 0xFFFFFF;
         public const float DividerAlpha = 0.3f;
 
         // ---- Motion ----
         /// <summary>Fade-in time of the bar; each icon then takes the same time, starting a little after the previous one.</summary>
-        public const double EnterSeconds = 0.30;
+        public const double EnterSeconds = 0.42;
         public const double StaggerSeconds = 0.024;
         /// <summary>Time the selection takes to reach the next item.</summary>
         public const double FocusSeconds = 0.30;

@@ -30,6 +30,8 @@ namespace Launcher.Core
         public static readonly int LabelRow = Design.ShowLabels || Design.ShowClock ? LabelGap + LabelH : 0;
         public const int Margin = 40;          // room for the bar's shadow on every side (also: pill bottom to screen bottom)
         public const int BottomGap = 0;        // window bottom to screen bottom
+        /// <summary>Drops the whole dock this far. The pill stays clear of the screen edge.</summary>
+        public const int DockLower = 16;
         public const int ScreenSideGap = 12;   // pill never closer than this to the screen edge
         public const int MaxPillW = 1808;      // the bar is never wider than this
         public const int HighlightPad = 32;      // reach of the soft glow around the focused icon (spread * 1.95, rounded up)
@@ -44,11 +46,13 @@ namespace Launcher.Core
         public const int PillItemW = 232;
         public const int PillItemH = 48;
         public const int PillItemGap = 8;
-        /// <summary>Overlay: stacked Settings/Home are square icons this size, not labelled capsules.</summary>
-        public static readonly int PinW = Design.IconOnlyPins ? 56 : PillItemW;
-        public static readonly int PinH = Design.IconOnlyPins ? 56 : PillItemH;
+        /// <summary>Overlay: the Settings/Home stack together is as tall as one app tile.</summary>
+        public static readonly int PinH = Design.IconOnlyPins ? (Icon - PillItemGap) / 2 : PillItemH;
+        public static readonly int PinW = Design.IconOnlyPins ? PinH : PillItemW;
         /// <summary>Reach of the capsule glow around a focused pill (same spread as the icons' glow).</summary>
         public const int PillGlowPad = 32;
+        /// <summary>Glow around a small stacked pin. The app glow would be wider than the pin itself.</summary>
+        public static readonly int PinGlowPad = Design.IconOnlyPins ? Math.Max(6, HighlightPad * PinH / FocusIcon) : PillGlowPad;
         /// <summary>Smallest space kept between the label and the clock; with less, the clock is not drawn.</summary>
         public const int ClockGap = 16;
         // Room for the navigation hint ("Input" above the apps, "Back" below the inputs): HintH is the
@@ -64,6 +68,8 @@ namespace Launcher.Core
         /// <summary>Width of the area the apps scroll in; with pinned entries it excludes them and the gap.</summary>
         public readonly int ViewportW;
         public readonly int PillW, PillH, WinW, WinH, WinX, WinY;
+        /// <summary>Height of the icon row: the focused app, or the stacked pins if they are taller.</summary>
+        public readonly int RowH;
         /// <summary>Number of items that scroll (all of them without a group) and of pinned system entries.</summary>
         public readonly int AppCount, PinnedCount;
         /// <summary>Width of the app strip alone, and of the pinned entries alone.</summary>
@@ -114,14 +120,16 @@ namespace Launcher.Core
             PillW = Math.Min(ContentW + 2 * PadX, maxPill);
             ViewportW = PillW - 2 * PadX - leftBlock - rightBlock;
             if (ViewportW < 0) ViewportW = 0;
-            PillH = PadTop + FocusIcon + LabelRow + PadBottom;
+            int stackH = PinnedCount == 0 ? 0 : PinnedCount * PinH + Math.Max(0, PinnedCount - 1) * PillItemGap;
+            RowH = Math.Max(FocusIcon, stackH);
+            PillH = PadTop + RowH + LabelRow + PadBottom;
             WinW = PillW + 2 * Margin;
             if (fullWidth) { OffsetX = (screenW - WinW) / 2; WinW = screenW; }
             else if (windowW > WinW) { OffsetX = (windowW - WinW) / 2; WinW = windowW; }
             WinH = PillH + 2 * Margin + HintH;
             Raised = raised;
             WinX = (screenW - WinW) / 2;
-            WinY = screenH - WinH - BottomGap;
+            WinY = screenH - WinH - BottomGap + DockLower;
         }
 
         /// <summary>True when the apps do not fit their viewport; the pinned entries never move.</summary>
@@ -173,7 +181,7 @@ namespace Launcher.Core
         /// <summary>Window-relative y of the pill's top edge (without the slide).</summary>
         public int Top { get { return Margin + (Raised ? 0 : HintH); } }
 
-        public int RowCenterY { get { return Top + PadTop + FocusIcon / 2; } }
+        public int RowCenterY { get { return Top + PadTop + RowH / 2; } }
 
         /// <summary>False (--no-motion): the selected icon neither grows nor rises; the glow and the ring alone mark it.</summary>
         public static bool Grow = true;
@@ -182,6 +190,14 @@ namespace Launcher.Core
 
         public Box IconBox(int i, float focusPos, float scroll, int slide)
         {
+            if (IsLeftPin(i))
+            {
+                Box t;
+                t.W = Icon; t.H = Icon;
+                t.X = (int)Math.Round(Left + PadX + ItemCenter(i, scroll)) - Icon / 2;
+                t.Y = RowCenterY - Icon / 2 + slide;
+                return t;
+            }
             if (IsPinned(i))
             {
                 // A right-side control does not grow; the glow behind it says it is focused.
@@ -245,16 +261,18 @@ namespace Launcher.Core
         /// <summary>Box of the glow around item <paramref name="i"/> (its final size; only its opacity changes).</summary>
         public Box GlowBox(int i, float scroll, int slide)
         {
-            bool pill = IsPinned(i);
-            int pad = pill ? PillGlowPad : HighlightPad;
-            int iconSide = Grow ? FocusIcon : Icon;   // without growth the glow hugs the icon as it is
-            int w = (pill ? PinW : iconSide) + 2 * pad;
-            int h = (pill ? PinH : iconSide) + 2 * pad;
+            bool pin = IsPinned(i), left = IsLeftPin(i);
+            int pad = pin ? PinGlowPad : HighlightPad;
+            int iconSide = Grow ? FocusIcon : Icon;
+            int sideW = pin ? PinW : (left ? Icon : iconSide);
+            int sideH = pin ? PinH : (left ? Icon : iconSide);
+            int w = sideW + 2 * pad;
+            int h = sideH + 2 * pad;
             int cx = (int)Math.Round(Left + PadX + ItemCenter(i, scroll));
             Box b;
             b.W = w; b.H = h;
             b.X = cx - w / 2;
-            b.Y = (pill ? PillTop(i) - pad : RowCenterY - h / 2 - (Grow ? Design.Lift : 0)) + slide;   // the glow rises with the selected icon
+            b.Y = (pin ? PillTop(i) - pad : RowCenterY - h / 2 - (left || !Grow ? 0 : Design.Lift)) + slide;
             return b;
         }
 
@@ -320,8 +338,8 @@ namespace Launcher.Core
             return b;
         }
 
-        public int WeatherLeft { get { return 48; } }
-        public int ClockRightEdge { get { return WinW - 48; } }
+        public int WeatherMid { get { return Left / 2; } }
+        public int ClockMid { get { return (Left + PillW + WinW) / 2; } }
 
         /// <summary>Window-relative right edge of the clock, on the label row.</summary>
         public int ClockRight { get { return Left + PillW - PadX; } }

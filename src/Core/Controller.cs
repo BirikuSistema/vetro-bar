@@ -99,6 +99,9 @@ namespace Launcher.Core
         /// </summary>
         public int Slide { get { return Instant ? 0 : _cascade && Phase == Phase.Showing ? 0 : (int)Math.Round((1f - Ease(Presence)) * DockLayout.SlideDistance); } }
 
+        /// <summary>Horizontal offset of the side chrome: the clock comes in from the right, the weather from the left. 0 when shown.</summary>
+        public int SideShift { get { return Instant ? 0 : (int)Math.Round((1f - Ease(Presence)) * Design.SideEnter); } }
+
         /// <summary>0..1: how far item <paramref name="i"/> has come in. It follows the bar's own presence once the cascade is over (and when hiding).</summary>
         public float ItemPresence(int i)
         {

@@ -406,7 +406,14 @@ namespace Launcher
 
         // ------------------------------------------------------------------ clock
 
+        private static readonly string[] DayNames = { "Domingo", "Lunes", "Martes", "Miércoles", "Jueves", "Viernes", "Sábado" };
+        private static readonly string[] MonthNames = { "Enero", "Febrero", "Marzo", "Abril", "Mayo", "Junio", "Julio", "Agosto", "Septiembre", "Octubre", "Noviembre", "Diciembre" };
         private static string ClockText() { return DateTime.Now.ToString("HH:mm"); }
+        private static string DayText()
+        {
+            DateTime n = DateTime.Now;
+            return DayNames[(int)n.DayOfWeek] + " " + n.Day + " de " + MonthNames[n.Month - 1];
+        }
 
         /// <summary>
         /// Shows the time and arms one timer for the next minute change. It runs only while the dock
@@ -415,8 +422,11 @@ namespace Launcher
         private static void StartClock()
         {
             string t = ClockText();
+            string day = DayText();
             _appsDock.SetClock(t);
             _inputsDock.SetClock(t);
+            _appsDock.SetDay(day);
+            _inputsDock.SetDay(day);
             if (_clockTimer != IntPtr.Zero) Efl.ecore_timer_del(_clockTimer);
             DateTime now = DateTime.Now;
             double wait = 60.0 - now.Second - now.Millisecond / 1000.0 + 0.05;
@@ -503,7 +513,13 @@ namespace Launcher
                     // The fade has already rendered on earlier frames; a slow platform launch cannot freeze it.
                     AppEntry pending = _pendingLaunch;
                     _pendingLaunch = null;
-                    if (pending != null) { if (pending.SourceType >= 0) SwitchSource(pending); else Launch(pending); }
+                    if (pending != null)
+                    {
+                        // A tuner switch has to go out even when the entry also names an app:
+                        // HDMI stays put if only the app is launched.
+                        if (pending.SourceType >= 0) SwitchSource(pending);
+                        if (pending.AppId != null || pending.Key != null || pending.SourceType < 0) Launch(pending);
+                    }
                 }
                 if (_perf) PerfSample(dt, (Stopwatch.GetTimestamp() - t0) * 1000.0 / Stopwatch.Frequency, !more);
                 if (more) return 1;
@@ -988,7 +1004,8 @@ namespace Launcher
                 string dumpIcons = Arg(args, "--dump-icons");
                 if (dumpIcons != null && Directory.Exists(dumpIcons)) Dock.DumpIconsTo = dumpIcons;
                 Weather.LoadCache();
-                Weather.Refresh();
+                try { Weather.Refresh().Wait(5000); } catch (Exception ex) { Log("weather wait: " + ex.Message); }
+                Log("weather " + (Weather.Text ?? "none") + (Weather.LastError != null ? " (" + Weather.LastError + ")" : ""));
                 _appsDock = new Dock(_win, layout, _apps, res, Log, Design.HintText, true);
                 _appsDock.Build();
                 _inputsDock = new Dock(_win, inputsLayout, _inputs, res, Log, "Back", false);
