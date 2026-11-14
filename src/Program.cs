@@ -38,7 +38,8 @@ namespace Launcher
 
         private static InputWatcher _input;
         private static string _dir, _pidPath, _fifoPath;
-        private static IntPtr _win, _anim, _idle, _fifoHandler, _clockTimer, _weatherTimer, _premapTimer;
+        private static IntPtr _win, _anim, _idle, _fifoHandler, _clockTimer, _weatherTimer, _premapTimer, _reactivateTimer;
+        private static int _reactivateLeft;
         private static int _fifoFd = -1;
         private static double _lastFrame;
         private static AppEntry[] _apps, _inputs;
@@ -199,16 +200,32 @@ namespace Launcher
             _dock.Apply(_ctl);
             Efl.evas_object_show(_win);
             Efl.elm_win_activate(_win);
-            Efl.ecore_timer_add(0.18, ReactivateCb, IntPtr.Zero);
+            ScheduleReactivate();
             StartClock();
             StartAnimator();
             ResetIdle();
         }
 
+        private static void ScheduleReactivate()
+        {
+            _reactivateLeft = 4;
+            if (_reactivateTimer == IntPtr.Zero)
+                _reactivateTimer = Efl.ecore_timer_add(0.16, ReactivateCb, IntPtr.Zero);
+        }
+
         private static byte OnReactivate(IntPtr data)
         {
-            try { if (_ctl != null && _ctl.IsActive) Efl.elm_win_activate(_win); }
+            try
+            {
+                if (_ctl != null && _ctl.IsActive && _reactivateLeft > 0)
+                {
+                    _reactivateLeft--;
+                    Efl.elm_win_activate(_win);
+                    if (_reactivateLeft > 0) return 1;
+                }
+            }
             catch (Exception) { }
+            _reactivateTimer = IntPtr.Zero;
             return 0;
         }
 
@@ -441,7 +458,25 @@ namespace Launcher
         {
             _perfWhy = "home";
             if (_homeLaunch != null) { LauncherSvc.LaunchApp(_homeLaunch); LauncherSvc.ArmGuard(); return; }
+            if (_ctl.Phase == Phase.Showing || _ctl.Phase == Phase.Hiding)
+            {
+                OnRawHomeBurst();
+                return;
+            }
             if (_ctl.IsActive) HideDock(); else ShowDock();
+            LauncherSvc.ArmGuard();
+        }
+
+        private static void OnRawHomeBurst()
+        {
+            if (_homeLaunch != null) { LauncherSvc.ArmGuard(); return; }
+            if (_ctl.IsActive)
+            {
+                Efl.evas_object_show(_win);
+                Efl.elm_win_activate(_win);
+                ScheduleReactivate();
+                ResetIdle();
+            }
             LauncherSvc.ArmGuard();
         }
 
@@ -480,6 +515,13 @@ namespace Launcher
                             if (now - _input.LastRawHome < HomeEchoSeconds)
                             {
                                 Logger.Write("home echo ignored " + ((now - _input.LastRawHome) * 1000).ToString("0") + " ms after the press");
+                                if (_ctl.IsActive) Efl.elm_win_activate(_win);
+                                break;
+                            }
+                            if (now - _input.LastHome < InputWatcher.HomeDebounceSeconds || _ctl.Phase == Phase.Showing || _ctl.Phase == Phase.Hiding)
+                            {
+                                _input.LastHome = now;
+                                OnRawHomeBurst();
                                 break;
                             }
                             _input.LastHome = now;
@@ -663,7 +705,7 @@ namespace Launcher
                     Logger.Write(_homeLaunch != null ? "home key launches " + homeLaunch + "; the dock is not shown" : "home-launch: bad app id ignored");
                 }
 
-                _input = new InputWatcher(OnRawHome, OnRawNav);
+                _input = new InputWatcher(OnRawHome, OnRawHomeBurst, OnRawNav);
                 _input.Start(Arg(args, "--home-code") ?? Environment.GetEnvironmentVariable("TVLAUNCHER_HOME_CODE"), Flag(args, "--learn"));
 
                 string fpsArg = Arg(args, "--vblank-fps");

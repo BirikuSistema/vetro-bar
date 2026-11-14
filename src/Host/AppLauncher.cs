@@ -19,6 +19,7 @@ namespace Launcher.Host
         private const string KeyTool = "/usr/bin/input_keyevent ";
 
         private readonly Efl.TaskCb _keyTimerCb;
+        private readonly object _guardLock = new object();
         private string[] _guardApps;
         private string _guardFile;
         private int _guardGen;
@@ -64,10 +65,24 @@ namespace Launcher.Host
             if (_guardApps == null) return;
             try
             {
-                int gen = NewGuardGeneration();
-                string cmd = HomeGuard.Command(_guardApps, _guardFile, gen);
-                if (Array.IndexOf(_guardApps, "com.samsung.tv.csfs") >= 0)
-                    cmd = "pkill -9 -f csfs.dll >/dev/null 2>&1; " + cmd;
+                int gen;
+                string cmd;
+                lock (_guardLock)
+                {
+                    gen = NewGuardGeneration();
+                    cmd = HomeGuard.Command(_guardApps, _guardFile, gen);
+                    if (Array.IndexOf(_guardApps, "com.samsung.tv.csfs") >= 0)
+                    {
+                        string quotedFile = "'" + _guardFile.Replace("'", "'\"'\"'") + "'";
+                        string g = gen.ToString(CultureInfo.InvariantCulture);
+                        string check = "[ \"$(cat " + quotedFile + ")\" = " + g + " ] || exit 0; ";
+                        string fastKill = "pkill -9 -f '[c]sfs.dll'; ";
+                        cmd = cmd.Replace(
+                            "/usr/bin/app_launcher -k com.samsung.tv.csfs;",
+                            fastKill + "/usr/bin/app_launcher -k com.samsung.tv.csfs;");
+                        cmd = "( " + check + fastKill + "sleep 0.06; " + check + fastKill + ") >/dev/null 2>&1 & " + cmd;
+                    }
+                }
                 ThreadPool.QueueUserWorkItem(_ =>
                 {
                     try { Libc.system(cmd); }
@@ -82,7 +97,7 @@ namespace Launcher.Host
             if (_guardApps == null) return;
             try
             {
-                NewGuardGeneration();
+                lock (_guardLock) NewGuardGeneration();
                 Logger.Write("guard: cancelled, " + string.Join(",", _guardApps) + " was asked for");
             }
             catch (Exception ex) { Logger.Write("guard cancel: " + ex.Message); }

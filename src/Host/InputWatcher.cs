@@ -15,7 +15,8 @@ namespace Launcher.Host
     internal sealed class InputWatcher
     {
         private const double RescanSeconds = 1.5;
-        private const double HomeDebounceSeconds = 0.35;
+        public const double HomeDebounceSeconds = 0.55;
+        private const double DuplicateEventSeconds = 0.05;
         private const int EAgain = 11;
 
         private readonly List<int> _fds = new List<int>();
@@ -31,6 +32,7 @@ namespace Launcher.Host
         private readonly Efl.TaskCb _rescanCb;
         private readonly Efl.TaskCb _quickRescanCb;
         private readonly Action _onHome;
+        private readonly Action _onHomeBurst;
         private readonly Action<int> _onNav;
 
         private int _inotifyFd = -1;
@@ -45,9 +47,10 @@ namespace Launcher.Host
         public double LastRawHome { get; private set; } = -100;
         public double LastHome { get { return _lastHome; } set { _lastHome = value; } }
 
-        public InputWatcher(Action onHome, Action<int> onNav)
+        public InputWatcher(Action onHome, Action onHomeBurst, Action<int> onNav)
         {
             _onHome = onHome;
+            _onHomeBurst = onHomeBurst;
             _onNav = onNav;
             _inputCb = OnInput;
             _inotifyCb = OnInotify;
@@ -180,9 +183,15 @@ namespace Launcher.Host
                             continue;
                         }
                         double now = Efl.ecore_time_get();
-                        if (now - _lastHome < HomeDebounceSeconds) continue;
-                        _lastHome = now;
+                        double dt = now - _lastHome;
                         LastRawHome = now;
+                        if (dt < DuplicateEventSeconds) continue;
+                        _lastHome = now;
+                        if (dt < HomeDebounceSeconds)
+                        {
+                            if (_onHomeBurst != null) _onHomeBurst();
+                            continue;
+                        }
                         _onHome();
                     }
                 }
