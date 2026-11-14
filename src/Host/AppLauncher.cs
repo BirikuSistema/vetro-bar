@@ -66,6 +66,8 @@ namespace Launcher.Host
             {
                 int gen = NewGuardGeneration();
                 string cmd = HomeGuard.Command(_guardApps, _guardFile, gen);
+                if (Array.IndexOf(_guardApps, "com.samsung.tv.csfs") >= 0)
+                    cmd = "pkill -9 -f csfs.dll >/dev/null 2>&1; " + cmd;
                 ThreadPool.QueueUserWorkItem(_ =>
                 {
                     try { Libc.system(cmd); }

@@ -15,8 +15,13 @@ namespace Launcher.Native
         public const int O_NONBLOCK = 0x800;   // Linux (ARM and x86)
         public const int O_WRONLY = 1;
         public const int EAGAIN = 11;
+        public const int IN_NONBLOCK = 0x800;
+        public const uint IN_CREATE = 0x00000100;
+        public const uint IN_ATTRIB = 0x00000004;
 
         [DllImport(C, SetLastError = true)] public static extern int setenv(string name, string value, int overwrite);
+        [DllImport(C, SetLastError = true)] public static extern int inotify_init1(int flags);
+        [DllImport(C, SetLastError = true)] public static extern int inotify_add_watch(int fd, string pathname, uint mask);
         [DllImport(C, SetLastError = true)] public static extern int mkfifo(string path, uint mode);
         [DllImport(C, SetLastError = true)] public static extern int open(string path, int flags);
         [DllImport(C, SetLastError = true)] public static extern int close(int fd);

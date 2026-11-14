@@ -9,11 +9,12 @@ namespace Launcher.Host
 {
     /// <summary>
     /// Watches the remote control's evdev nodes read-only through ecore fd handlers,
-    /// handling hot-plug rescans, Home-key debouncing, and raw navigation presses.
+    /// using Linux inotify on /dev/input for instant (&lt;80 ms) Bluetooth remote reconnect
+    /// detection plus a periodic rescan fallback.
     /// </summary>
     internal sealed class InputWatcher
     {
-        private const double RescanSeconds = 3.0;
+        private const double RescanSeconds = 1.5;
         private const double HomeDebounceSeconds = 0.35;
         private const int EAgain = 11;
 
@@ -26,11 +27,16 @@ namespace Launcher.Host
         private readonly List<int> _presses = new List<int>();
 
         private readonly Efl.FdCb _inputCb;
+        private readonly Efl.FdCb _inotifyCb;
         private readonly Efl.TaskCb _rescanCb;
+        private readonly Efl.TaskCb _quickRescanCb;
         private readonly Action _onHome;
         private readonly Action<int> _onNav;
 
+        private int _inotifyFd = -1;
+        private IntPtr _inotifyHandler;
         private IntPtr _rescanTimer;
+        private IntPtr _quickRescanTimer;
         private bool _listFailed;
         private int _homeCode = -1;
         private bool _learn;
@@ -44,7 +50,9 @@ namespace Launcher.Host
             _onHome = onHome;
             _onNav = onNav;
             _inputCb = OnInput;
+            _inotifyCb = OnInotify;
             _rescanCb = OnRescan;
+            _quickRescanCb = OnQuickRescan;
         }
 
         public void Start(string homeCodeArg, bool learn)
@@ -55,8 +63,47 @@ namespace Launcher.Host
             if (_homeCode < 0 && !_learn) return;
 
             WatchNewNodes();
+            SetupInotify();
             Logger.Write("home key code " + (_homeCode < 0 ? "not set" : _homeCode.ToString()) + (_learn ? ", learn mode (every key press is logged)" : ""));
             _rescanTimer = Efl.ecore_timer_add(RescanSeconds, _rescanCb, IntPtr.Zero);
+        }
+
+        private void SetupInotify()
+        {
+            try
+            {
+                int fd = Libc.inotify_init1(Libc.IN_NONBLOCK);
+                if (fd < 0) return;
+                if (Libc.inotify_add_watch(fd, "/dev/input", Libc.IN_CREATE | Libc.IN_ATTRIB) < 0)
+                {
+                    Libc.close(fd);
+                    return;
+                }
+                _inotifyFd = fd;
+                _inotifyHandler = Efl.ecore_main_fd_handler_add(fd, Efl.EcoreFdRead, _inotifyCb, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero);
+            }
+            catch (Exception) { }
+        }
+
+        private byte OnInotify(IntPtr data, IntPtr handler)
+        {
+            try
+            {
+                while ((long)Libc.read(_inotifyFd, _buf, (UIntPtr)_buf.Length) > 0) { }
+                WatchNewNodes();
+                if (_quickRescanTimer == IntPtr.Zero)
+                    _quickRescanTimer = Efl.ecore_timer_add(0.08, _quickRescanCb, IntPtr.Zero);
+            }
+            catch (Exception) { }
+            return 1;
+        }
+
+        private byte OnQuickRescan(IntPtr data)
+        {
+            _quickRescanTimer = IntPtr.Zero;
+            try { WatchNewNodes(); }
+            catch (Exception) { }
+            return 0;
         }
 
         private int WatchNewNodes()

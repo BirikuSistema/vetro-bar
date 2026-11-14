@@ -29,6 +29,7 @@ namespace Launcher
         private static readonly Efl.TaskCb WeatherSoonCb = OnWeatherSoon;
         private static readonly Efl.TaskCb FpsCb = OnFps;
         private static readonly Efl.TaskCb PremapCb = OnPremap;
+        private static readonly Efl.TaskCb ReactivateCb = OnReactivate;
 
         private static readonly CommandBuffer Commands = new CommandBuffer();
         private static readonly NavigationInput Navigation = new NavigationInput();
@@ -88,7 +89,11 @@ namespace Launcher
                 if (!string.IsNullOrEmpty(c) && File.Exists(Path.Combine(c, display))) { runtime = c; break; }
             if (runtime == null) runtime = Directory.Exists("/run/user/" + uid) ? "/run/user/" + uid : "/run";
             Libc.setenv("XDG_RUNTIME_DIR", runtime, 1);
-            if (File.Exists("/run/pulse/native")) Libc.setenv("PULSE_RUNTIME_PATH", "/run/pulse", 0);
+            if (File.Exists("/run/pulse/native"))
+            {
+                Libc.setenv("PULSE_RUNTIME_PATH", "/run/pulse", 0);
+                Libc.setenv("PULSE_PROP", "media.role=system", 0);
+            }
             Libc.setenv("WAYLAND_DISPLAY", "wayland-0", 0);
             Libc.setenv("ELM_PROFILE", "tv", 0);
             Libc.setenv("ELM_DISPLAY", "wl", 0);
@@ -194,9 +199,17 @@ namespace Launcher
             _dock.Apply(_ctl);
             Efl.evas_object_show(_win);
             Efl.elm_win_activate(_win);
+            Efl.ecore_timer_add(0.18, ReactivateCb, IntPtr.Zero);
             StartClock();
             StartAnimator();
             ResetIdle();
+        }
+
+        private static byte OnReactivate(IntPtr data)
+        {
+            try { if (_ctl != null && _ctl.IsActive) Efl.elm_win_activate(_win); }
+            catch (Exception) { }
+            return 0;
         }
 
         private static void HideDock(bool playSound = true)
@@ -624,7 +637,7 @@ namespace Launcher
                 string dumpIcons = Arg(args, "--dump-icons");
                 if (dumpIcons != null && Directory.Exists(dumpIcons)) Dock.DumpIconsTo = dumpIcons;
                 Weather.LoadCache();
-                try { Weather.Refresh().Wait(5000); } catch (Exception ex) { Logger.Write("weather wait: " + ex.Message); }
+                try { Weather.Refresh(); } catch (Exception ex) { Logger.Write("weather refresh: " + ex.Message); }
                 Logger.Write("weather " + (Weather.Text ?? "none") + (Weather.LastError != null ? " (" + Weather.LastError + ")" : ""));
 
                 _appsDock = new Dock(_win, layout, _apps, res, Logger.Write, Design.HintText, true);

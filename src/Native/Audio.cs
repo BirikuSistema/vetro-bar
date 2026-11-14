@@ -17,9 +17,10 @@ namespace Launcher.Native
 
     /// <summary>
     /// Low-latency UI sound player for Tizen 6.
-    /// Probes PulseAudio (libpulse-simple.so.0) first so preloaded 48 kHz PCM buffers play from memory
-    /// on a dedicated background thread with zero main-loop blocking, and falls back to Tizen's
-    /// wav_player (libcapi-media-wav-player.so.0) or paplay/aplay if PulseAudio is unavailable.
+    /// Preloads 48 kHz PCM buffers in RAM and plays them through PulseAudio (libpulse-simple.so.0)
+    /// on a dedicated background thread. The PulseAudio stream is opened on demand and closed
+    /// automatically after 1.5 s of idle time so no stream is ever left open across TV standby,
+    /// HDMI/TDT source switches, or media app playback.
     /// </summary>
     internal static class SoundPlayer
     {
@@ -27,6 +28,7 @@ namespace Launcher.Native
 
         private const int PaStreamPlayback = 1;
         private const int PaSampleS16Le = 3;
+        private const int IdleCloseMs = 1500;
 
         [StructLayout(LayoutKind.Sequential)]
         private struct PaSampleSpec
@@ -84,6 +86,7 @@ namespace Launcher.Native
 
         private static Backend _backend = Backend.None;
         private static IntPtr _pa = IntPtr.Zero;
+        private static int _rate = 48000, _channels = 2;
         private static string _cliBin;
         private static Action<string> _log;
 
@@ -100,7 +103,6 @@ namespace Launcher.Native
             if (!Directory.Exists(soundsDir)) { _log("sound: directory not found (" + soundsDir + ")"); return; }
 
             int loaded = 0;
-            int rate = 48000, channels = 2;
             for (int i = 0; i < FileNames.Length; i++)
             {
                 string path = Path.Combine(soundsDir, FileNames[i]);
@@ -117,8 +119,8 @@ namespace Launcher.Native
                     byte[] pcm = new byte[info.DataLength];
                     Buffer.BlockCopy(raw, info.DataOffset, pcm, 0, info.DataLength);
                     Clips[i] = new SoundClip(path, pcm, info.SampleRate, info.Channels);
-                    rate = info.SampleRate;
-                    channels = info.Channels;
+                    _rate = info.SampleRate;
+                    _channels = info.Channels;
                     loaded++;
                 }
                 catch (Exception ex) { _log("sound: load " + FileNames[i] + ": " + ex.Message); }
@@ -126,11 +128,12 @@ namespace Launcher.Native
 
             if (loaded == 0) { _log("sound: no clips loaded"); return; }
 
-            if (TryInitPulse(rate, channels))
+            if (TryOpenPulse())
             {
+                ClosePulse();   // do not hold the sink open while idle
                 _backend = Backend.PulseSimple;
                 StartWorker();
-                _log("sound: PulseAudio ready (" + loaded + " clips, " + rate + " Hz)");
+                _log("sound: PulseAudio ready on-demand (" + loaded + " clips, " + _rate + " Hz)");
                 return;
             }
 
@@ -157,15 +160,16 @@ namespace Launcher.Native
             _log("sound: no supported audio backend found");
         }
 
-        private static bool TryInitPulse(int rate, int channels)
+        private static bool TryOpenPulse()
         {
+            if (_pa != IntPtr.Zero) return true;
             try
             {
                 var ss = new PaSampleSpec
                 {
                     Format = PaSampleS16Le,
-                    Rate = (uint)rate,
-                    Channels = (byte)channels
+                    Rate = (uint)_rate,
+                    Channels = (byte)_channels
                 };
                 var attr = new PaBufferAttr
                 {
@@ -179,7 +183,7 @@ namespace Launcher.Native
                 IntPtr pa = pa_simple_new(null, "vetro-bar", PaStreamPlayback, null, "ui", ref ss, IntPtr.Zero, ref attr, out err);
                 if (pa == IntPtr.Zero)
                 {
-                    _log("sound: pa_simple_new failed (err=" + err + ")");
+                    if (!_loggedPlayError) { _loggedPlayError = true; _log("sound: pa_simple_new failed (err=" + err + ")"); }
                     return false;
                 }
                 _pa = pa;
@@ -187,7 +191,18 @@ namespace Launcher.Native
             }
             catch (DllNotFoundException) { return false; }
             catch (EntryPointNotFoundException) { return false; }
-            catch (Exception ex) { _log("sound: pulse probe: " + ex.Message); return false; }
+            catch (Exception ex)
+            {
+                if (!_loggedPlayError) { _loggedPlayError = true; _log("sound: pulse open: " + ex.Message); }
+                return false;
+            }
+        }
+
+        private static void ClosePulse()
+        {
+            if (_pa == IntPtr.Zero) return;
+            try { pa_simple_free(_pa); } catch (Exception) { }
+            _pa = IntPtr.Zero;
         }
 
         private static void StartWorker()
@@ -211,14 +226,21 @@ namespace Launcher.Native
         {
             while (!_stopping)
             {
-                Wake.WaitOne();
+                bool signaled = Wake.WaitOne(_pa != IntPtr.Zero ? IdleCloseMs : Timeout.Infinite);
                 if (_stopping) break;
+                if (!signaled)
+                {
+                    // Idle timeout elapsed with no new sound: release the PulseAudio stream so tizenaudio-sink never wedges.
+                    ClosePulse();
+                    continue;
+                }
                 int idx = Interlocked.Exchange(ref _pending, -1);
                 if (idx < 0) continue;
                 SoundClip clip = Clips[idx];
                 if (clip == null) continue;
                 PlayClip(clip);
             }
+            ClosePulse();
         }
 
         private static void PlayClip(SoundClip clip)
@@ -232,10 +254,17 @@ namespace Launcher.Native
                         if (_pa != IntPtr.Zero)
                         {
                             pa_simple_flush(_pa, out err);
-                            if (pa_simple_write(_pa, clip.Pcm, (UIntPtr)clip.Pcm.Length, out err) < 0 && !_loggedPlayError)
+                            if (pa_simple_write(_pa, clip.Pcm, (UIntPtr)clip.Pcm.Length, out err) >= 0)
+                                break;
+                            // Reconnect once if PulseAudio restarted or suspended the stream after standby.
+                            ClosePulse();
+                        }
+                        if (TryOpenPulse())
+                        {
+                            if (pa_simple_write(_pa, clip.Pcm, (UIntPtr)clip.Pcm.Length, out err) < 0)
                             {
-                                _loggedPlayError = true;
-                                _log("sound: pa_simple_write failed (err=" + err + ")");
+                                if (!_loggedPlayError) { _loggedPlayError = true; _log("sound: pa_simple_write failed (err=" + err + ")"); }
+                                ClosePulse();
                             }
                         }
                         break;
@@ -273,11 +302,7 @@ namespace Launcher.Native
             _stopping = true;
             Wake.Set();
             if (_worker != null && _worker.IsAlive) _worker.Join(200);
-            if (_pa != IntPtr.Zero)
-            {
-                try { pa_simple_free(_pa); } catch (Exception) { }
-                _pa = IntPtr.Zero;
-            }
+            ClosePulse();
             _backend = Backend.None;
         }
     }
