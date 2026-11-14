@@ -1,20 +1,15 @@
 using System;
-using System.Collections.Generic;
 using System.Diagnostics;
+using System.Globalization;
 using System.IO;
 using System.Runtime.InteropServices;
 using Launcher.Core;
+using Launcher.Host;
 using Launcher.Native;
 using Launcher.Ui;
 
 // Native Samsung TV launcher: a glass dock over the running app, drawn with EFL through
 // P/Invoke and started by the system's signed `dotnet` (the TV refuses unsigned ELF binaries).
-//
-// Lifecycle (see README):
-//   * the process stays resident; Back/Home/idle only hide the window, so showing the dock
-//     again costs a window map instead of a dotnet cold start;
-//   * hidden, the process sleeps in the EFL main loop (no animator, no timer, no polling);
-//   * `show` / `hide` / `toggle` are read from a FIFO through an ecore fd handler.
 namespace Launcher
 {
     internal static class Program
@@ -22,114 +17,41 @@ namespace Launcher
         private const int NotificationLevelTop = 40;
         private const int WindowLayer = 900;
         private const int DefaultScreenW = 1920, DefaultScreenH = 1080;
+        private const double HomeEchoSeconds = 1.5;
 
         // Delegates handed to native code live in static fields so the GC can never collect them.
         private static readonly Efl.EvasCb KeyCb = OnKey;
         private static readonly Efl.TaskCb AnimCb = OnFrame;
         private static readonly Efl.TaskCb IdleCb = OnIdle;
         private static readonly Efl.FdCb FifoCb = OnFifo;
-        private static readonly Efl.FdCb InputCb = OnInput;
-
-        private static string _dir, _logPath, _pidPath, _fifoPath;
-        private static IntPtr _win, _anim, _idle, _fifoHandler;
-        private static int _fifoFd = -1;
-        private static double _lastFrame;
-        private static AppEntry[] _apps, _inputs;
-        // Two pages share one window: the apps row and the inputs panel. _ctl / _dock always
-        // point at the page on screen, so everything below works on "the dock" as before.
-        private static Controller _ctl, _appsCtl, _inputsCtl;
-        private static Dock _dock, _appsDock, _inputsDock;
-        private static IntPtr _clockTimer, _weatherTimer;
         private static readonly Efl.TaskCb ClockCb = OnClock;
         private static readonly Efl.TaskCb WeatherCb = OnWeather;
         private static readonly Efl.TaskCb WeatherSoonCb = OnWeatherSoon;
+        private static readonly Efl.TaskCb FpsCb = OnFps;
+        private static readonly Efl.TaskCb PremapCb = OnPremap;
+
         private static readonly CommandBuffer Commands = new CommandBuffer();
+        private static readonly NavigationInput Navigation = new NavigationInput();
+        private static readonly AppLauncher LauncherSvc = new AppLauncher();
         private static readonly byte[] ReadBuf = new byte[128];
 
-        // Remote-control input (read-only evdev, never grabbed): the Home key toggles the dock.
-        private const double HomeDebounceSeconds = 0.35;
-        // The raw press (evdev) opens the dock at once. The system holds Home to tell a short press from a long one
-        // and only then delivers XF86Home to the focused window, which is now the dock: on 2025 firmware that echo
-        // comes about 0.6 s later, well past the debounce. An XF86Home this soon after the raw press is the same
-        // press, not a request to close.
-        private const double HomeEchoSeconds = 1.5;
-
-        // --kill-on-home APPID[,APPID...]: the system sends Home to Samsung's own home app as well (it is relaunched
-        // by the key), so after each Home press the app is closed again, a few times because its start is slow.
-        // 2025 (RSM/CoBA) firmware splits Home into csfs plus separate sidebar and media windows that stay on top of
-        // the dock when only csfs is closed, so several ids may be given. Off by default; every id is checked as
-        // plain id characters because it goes on a command line.
-        // One process: a single shell runs every sleep and every kill (at 0.15, 0.45, 0.9, 1.6 and 2.8 s after the
-        // press, as before), so the dock itself spawns once per Home press instead of five times from the loop.
-        private static string[] _guardApps;
-        // The kills are tied to a generation written to a file: each Home press arms a new one, and launching the guarded
-        // app on purpose (the Samsung Home pill) retires it. Without that, Samsung Home started 1-2 s after a Home press
-        // was closed again by the kills still pending, and the pill seemed to do nothing.
-        private static int _guardGen;
-        private static string _guardFile;
-        private static int _homeCode = -1;
-        // --home-launch APPID: the custom launcher mode. The Home key opens that app instead of the dock, and the dock
-        // itself is never shown. Samsung's Home is NOT disabled in this mode (the TV's boot waits for it): the guard below is what keeps it away.
-        // The id is checked as plain id characters (Catalog.ValidAppId) because it goes on a command line.
+        private static InputWatcher _input;
+        private static string _dir, _pidPath, _fifoPath;
+        private static IntPtr _win, _anim, _idle, _fifoHandler, _clockTimer, _weatherTimer, _premapTimer;
+        private static int _fifoFd = -1;
+        private static double _lastFrame;
+        private static AppEntry[] _apps, _inputs;
+        private static Controller _ctl, _appsCtl, _inputsCtl;
+        private static Dock _dock, _appsDock, _inputsDock;
+        private static AppEntry _pendingLaunch;
         private static AppEntry _homeLaunch;
 
-        private static readonly NavigationInput Navigation = new NavigationInput();
-        private static double _lastRawHome = -100;
-        private static AppEntry _pendingLaunch;
-        private static bool _learn;
-        private static double _lastHome = -100;
-        // One entry per watched evdev node, in the order they were opened: ecore hands the index back to OnInput.
-        private static readonly List<int> _inputFds = new List<int>();
-        private static readonly List<EvdevReader> _inputReaders = new List<EvdevReader>();
-        private static readonly List<string> _inputPaths = new List<string>();
-        private static readonly List<IntPtr> _inputHandlers = new List<IntPtr>();
-        private static IntPtr _rescanTimer;
-        private static readonly Efl.TaskCb RescanCb = OnRescan;
-        private const double RescanSeconds = 3.0;
-        private const int EAgain = 11;
-        private static readonly byte[] InputBuf = new byte[16 * 32];
-        private static readonly List<int> InputPresses = new List<int>();
-
-        // ------------------------------------------------------------------ logging
-
-        // The process stays resident for weeks, so the file is cut down as it grows and not only at start. Callbacks run
-        // on the main loop, but the lock keeps the byte count and the file in step if anything else ever logs.
-        private static readonly object LogLock = new object();
-        private const long LogLimit = 256 * 1024;
-        private static long _logBytes;
-
-        private static void Log(string m)
-        {
-            try
-            {
-                string line = DateTime.Now.ToString("HH:mm:ss.fff") + " " + m + "\n";
-                lock (LogLock)
-                {
-                    _logBytes += System.Text.Encoding.UTF8.GetByteCount(line);
-                    if (_logBytes > LogLimit)
-                    {
-                        _logBytes = System.Text.Encoding.UTF8.GetByteCount(line);
-                        try { File.Delete(_logPath); } catch (Exception) { }
-                    }
-                    File.AppendAllText(_logPath, line);
-                }
-            }
-            catch (Exception) { }
-        }
-
-        private static void TrimLog()
-        {
-            try
-            {
-                lock (LogLock)
-                {
-                    var f = new FileInfo(_logPath);
-                    if (f.Exists && f.Length > LogLimit) { f.Delete(); _logBytes = 0; }
-                    else _logBytes = f.Exists ? f.Length : 0;
-                }
-            }
-            catch (Exception) { }
-        }
+        // --perf: frame-time probe (off by default)
+        private static bool _perf;
+        private static string _perfWhy = "?";
+        private static int _perfN;
+        private static readonly double[] PerfDt = new double[2048], PerfWork = new double[2048];
+        private static int _vblankFps;
 
         // ------------------------------------------------------------------ setup
 
@@ -156,12 +78,9 @@ namespace Launcher
             string want = (Environment.GetEnvironmentVariable("TVLAUNCHER_ENGINE") ?? "").ToLowerInvariant();
             bool egl = want == "egl" || (want != "shm" && Directory.Exists("/dev/dri"));
 
-            // The firmware's own apps run with wayland_egl whenever /dev/dri exists.
             Libc.setenv("ELM_ENGINE", "gl", 1);
             Libc.setenv("ECORE_EVAS_ENGINE", egl ? "wayland_egl" : "wayland_shm", 1);
 
-            // XDG_RUNTIME_DIR must be the directory that holds the compositor's socket. Inherited
-            // values are only trusted when the socket is really there (the root agent's may not be).
             string uid = Libc.getuid().ToString();
             string display = Environment.GetEnvironmentVariable("WAYLAND_DISPLAY") ?? "wayland-0";
             string runtime = null;
@@ -169,6 +88,7 @@ namespace Launcher
                 if (!string.IsNullOrEmpty(c) && File.Exists(Path.Combine(c, display))) { runtime = c; break; }
             if (runtime == null) runtime = Directory.Exists("/run/user/" + uid) ? "/run/user/" + uid : "/run";
             Libc.setenv("XDG_RUNTIME_DIR", runtime, 1);
+            if (File.Exists("/run/pulse/native")) Libc.setenv("PULSE_RUNTIME_PATH", "/run/pulse", 0);
             Libc.setenv("WAYLAND_DISPLAY", "wayland-0", 0);
             Libc.setenv("ELM_PROFILE", "tv", 0);
             Libc.setenv("ELM_DISPLAY", "wl", 0);
@@ -191,11 +111,6 @@ namespace Launcher
             catch (Exception) { return false; }
         }
 
-        /// <summary>
-        /// True when this process may run. When another launcher is alive it is asked to show
-        /// itself instead (a second Home press must not start a second dock). Never matches by
-        /// process name: the root agent is also a dotnet process.
-        /// </summary>
         private static bool AcquireInstance()
         {
             try
@@ -209,7 +124,7 @@ namespace Launcher
                 }
                 File.WriteAllText(_pidPath, Libc.getpid().ToString());
             }
-            catch (Exception ex) { Log("pidfile: " + ex.Message); }
+            catch (Exception ex) { Logger.Write("pidfile: " + ex.Message); }
             return true;
         }
 
@@ -227,8 +142,7 @@ namespace Launcher
             try
             {
                 int pid;
-                if (File.Exists(_pidPath) && int.TryParse(File.ReadAllText(_pidPath).Trim(), out pid)
-                    && pid == Libc.getpid())
+                if (File.Exists(_pidPath) && int.TryParse(File.ReadAllText(_pidPath).Trim(), out pid) && pid == Libc.getpid())
                 {
                     File.Delete(_pidPath);
                     Libc.unlink(_fifoPath);
@@ -240,86 +154,11 @@ namespace Launcher
         private static void SetupFifo()
         {
             Libc.unlink(_fifoPath);
-            if (Libc.mkfifo(_fifoPath, 438u) != 0) { Log("mkfifo failed: " + Marshal.GetLastWin32Error()); return; }
-            Libc.chmod(_fifoPath, 438u);   // 0666: it only accepts show/hide/toggle
-            // O_RDWR keeps a writer open ourselves, so the descriptor never reports EOF when a client disconnects.
+            if (Libc.mkfifo(_fifoPath, 438u) != 0) { Logger.Write("mkfifo failed: " + Marshal.GetLastWin32Error()); return; }
+            Libc.chmod(_fifoPath, 438u);
             _fifoFd = Libc.open(_fifoPath, Libc.O_RDWR | Libc.O_NONBLOCK);
-            if (_fifoFd < 0) { Log("open fifo failed: " + Marshal.GetLastWin32Error()); return; }
+            if (_fifoFd < 0) { Logger.Write("open fifo failed: " + Marshal.GetLastWin32Error()); return; }
             _fifoHandler = Efl.ecore_main_fd_handler_add(_fifoFd, Efl.EcoreFdRead, FifoCb, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero);
-        }
-
-        /// <summary>
-        /// Opens the remote's evdev nodes read-only and watches them through ecore fd handlers
-        /// (no polling of the keys; only the list of nodes is looked at again every few seconds). Reading does not consume the key: the system still sees it, so the
-        /// Samsung Home only stays out of the way while it is not running.
-        /// </summary>
-        private static void SetupInput(string[] args)
-        {
-            int code;
-            string want = Arg(args, "--home-code") ?? Environment.GetEnvironmentVariable("TVLAUNCHER_HOME_CODE");
-            if (want != null && int.TryParse(want, out code) && code > 0 && code < 768) _homeCode = code;
-            _learn = Flag(args, "--learn");
-            if (_homeCode < 0 && !_learn) return;
-
-            WatchNewNodes();
-            Log("home key code " + (_homeCode < 0 ? "not set" : _homeCode.ToString()) + (_learn ? ", learn mode (every key press is logged)" : ""));
-            // The remote's nodes come and go: it reconnects after standby, and Vetro creates its forwarding
-            // node some time after this process started. A node that appears later is picked up here.
-            _rescanTimer = Efl.ecore_timer_add(RescanSeconds, RescanCb, IntPtr.Zero);
-        }
-
-        /// <summary>Opens every remote node that is not being watched yet. Returns how many were added.</summary>
-        private static int WatchNewNodes()
-        {
-            List<string> nodes;
-            try { nodes = InputDevices.RemoteNodes(File.ReadAllText("/proc/bus/input/devices")); }
-            catch (Exception ex) { if (!_listFailed) Log("input: cannot list devices: " + ex.Message); _listFailed = true; return 0; }
-            _listFailed = false;
-            int added = 0;
-            foreach (string node in nodes)
-            {
-                if (_inputPaths.Contains(node)) continue;
-                int fd = Libc.open(node, Libc.O_RDONLY | Libc.O_NONBLOCK);
-                if (fd < 0)
-                {
-                    // The rescan comes back every few seconds: say it once per node, or the log fills with the same line.
-                    if (_openFailed.Add(node)) Log("input: cannot open " + node + " errno=" + Marshal.GetLastWin32Error());
-                    continue;
-                }
-                _openFailed.Remove(node);
-                // A node that went away (DropNode) leaves a free slot: take it, so the lists do not grow with every reconnect.
-                int index = _inputFds.IndexOf(-1);
-                bool reuse = index >= 0;
-                if (!reuse) index = _inputFds.Count;
-                IntPtr handler = Efl.ecore_main_fd_handler_add(fd, Efl.EcoreFdRead, InputCb, (IntPtr)index, IntPtr.Zero, IntPtr.Zero);
-                if (handler == IntPtr.Zero) { Libc.close(fd); Log("input: cannot watch " + node); continue; }
-                if (reuse) { _inputFds[index] = fd; _inputReaders[index] = new EvdevReader(); _inputPaths[index] = node; _inputHandlers[index] = handler; }
-                else { _inputFds.Add(fd); _inputReaders.Add(new EvdevReader()); _inputPaths.Add(node); _inputHandlers.Add(handler); }
-                added++;
-                Log("input: watching " + node);
-            }
-            return added;
-        }
-        private static bool _listFailed;
-        private static readonly HashSet<string> _openFailed = new HashSet<string>();
-
-        private static byte OnRescan(IntPtr data)
-        {
-            try { WatchNewNodes(); }
-            catch (Exception ex) { Log("input: rescan: " + ex.Message); }
-            return 1;
-        }
-
-        /// <summary>A node that was unplugged (the remote went to sleep) stops being watched; it is opened again when it returns.</summary>
-        private static void DropNode(int index)
-        {
-            if (_inputFds[index] < 0) return;
-            Log("input: lost " + _inputPaths[index]);
-            if (_inputHandlers[index] != IntPtr.Zero) Efl.ecore_main_fd_handler_del(_inputHandlers[index]);
-            Libc.close(_inputFds[index]);
-            _inputFds[index] = -1;
-            _inputHandlers[index] = IntPtr.Zero;
-            _inputPaths[index] = null;
         }
 
         private static AppEntry[] LoadApps(string path) { return Catalog.ArrangeBar(LoadList(path, Catalog.BuiltIn)); }
@@ -331,13 +170,13 @@ namespace Launcher
                 if (File.Exists(path))
                 {
                     CatalogResult r = Catalog.Parse(File.ReadAllText(path));
-                    foreach (string p in r.Problems) Log("apps: " + p);
+                    foreach (string p in r.Problems) Logger.Write("apps: " + p);
                     if (r.Entries.Length > 0) return r.Entries;
-                    Log("apps: " + path + " has no usable entries");
+                    Logger.Write("apps: " + path + " has no usable entries");
                 }
-                else Log("apps: " + path + " not found, using the built-in list");
+                else Logger.Write("apps: " + path + " not found, using the built-in list");
             }
-            catch (Exception ex) { Log("apps: " + ex.Message); }
+            catch (Exception ex) { Logger.Write("apps: " + ex.Message); }
             return builtIn();
         }
 
@@ -345,15 +184,13 @@ namespace Launcher
 
         private static void ShowDock()
         {
-            if (_homeLaunch != null) return;   // custom launcher mode: nothing of ours is ever drawn
+            if (_homeLaunch != null) return;
             _pendingLaunch = null;
-            // A key chosen just before the dock closed must not be sent into the dock that opens again.
-            CancelPendingKey();
-            // A dock that was closed from the inputs panel opens on the apps again.
+            LauncherSvc.CancelPendingKey();
             if (_ctl != _appsCtl && !_ctl.IsActive) ActivatePage(_appsCtl, _appsDock);
             if (!_ctl.Show()) { ResetIdle(); return; }
-            // The page may have been put away while its objects were still opaque (a swap to the inputs panel): draw its
-            // state for presence 0 before the window is mapped, or one frame can show it whole before the entrance starts.
+
+            SoundPlayer.Play(SoundEffect.Open);
             _dock.Apply(_ctl);
             Efl.evas_object_show(_win);
             Efl.elm_win_activate(_win);
@@ -362,12 +199,16 @@ namespace Launcher
             ResetIdle();
         }
 
-        private static void HideDock()
+        private static void HideDock(bool playSound = true)
         {
             _pendingLaunch = null;
             CancelIdle();
             StopClock();
-            if (_ctl.Hide()) StartAnimator();
+            if (_ctl.Hide())
+            {
+                if (playSound) SoundPlayer.Play(SoundEffect.Close);
+                StartAnimator();
+            }
         }
 
         // ------------------------------------------------------------------ pages
@@ -381,7 +222,6 @@ namespace Launcher
             _dock = dock;
         }
 
-        /// <summary>Moves to another page of a visible dock; it rises in over the previous one.</summary>
         private static void SelectPage(Controller ctl, Dock dock)
         {
             if (ctl == _ctl) return;
@@ -395,30 +235,27 @@ namespace Launcher
         private static void OpenInputs()
         {
             int current = -1, type;
-            // The firmware keeps the active input here (Vetro's TV state sensor reads the same key).
             if (Efl.vconf_get_int("memory/system/source_type", out type) == 0)
                 for (int i = 0; i < _inputs.Length; i++) if (_inputs[i].SourceType == type) { current = i; break; }
             _inputsDock.CurrentIndex = current;
             _inputsCtl.SetFocus(current >= 0 ? current : 0);
-            Log("inputs panel, source_type=" + type + " current=" + current);
+            Logger.Write("inputs panel, source_type=" + type + " current=" + current);
             SelectPage(_inputsCtl, _inputsDock);
         }
 
-        // ------------------------------------------------------------------ clock
+        // ------------------------------------------------------------------ clock / weather
 
         private static readonly string[] DayNames = { "Domingo", "Lunes", "Martes", "Miércoles", "Jueves", "Viernes", "Sábado" };
         private static readonly string[] MonthNames = { "Enero", "Febrero", "Marzo", "Abril", "Mayo", "Junio", "Julio", "Agosto", "Septiembre", "Octubre", "Noviembre", "Diciembre" };
+
         private static string ClockText() { return DateTime.Now.ToString("HH:mm"); }
+
         private static string DayText()
         {
             DateTime n = DateTime.Now;
             return DayNames[(int)n.DayOfWeek] + " " + n.Day + " de " + MonthNames[n.Month - 1];
         }
 
-        /// <summary>
-        /// Shows the time and arms one timer for the next minute change. It runs only while the dock
-        /// is on screen: nothing ticks while the dock is hidden.
-        /// </summary>
         private static void StartClock()
         {
             string t = ClockText();
@@ -449,7 +286,7 @@ namespace Launcher
         private static byte OnWeatherSoon(IntPtr data)
         {
             try { if (_ctl != null && _ctl.IsActive && _dock != null) _dock.Apply(_ctl); }
-            catch (Exception ex) { Log("weather: " + ex.Message); }
+            catch (Exception ex) { Logger.Write("weather: " + ex.Message); }
             return 0;
         }
 
@@ -460,18 +297,15 @@ namespace Launcher
                 Weather.Refresh();
                 if (_ctl != null && _ctl.IsActive && _dock != null) _dock.Apply(_ctl);
             }
-            catch (Exception ex) { Log("weather: " + ex.Message); }
+            catch (Exception ex) { Logger.Write("weather: " + ex.Message); }
             return 1;
         }
 
         private static byte OnClock(IntPtr data)
         {
-            _clockTimer = IntPtr.Zero;   // returning 0 makes ecore free the timer
-            try
-            {
-                if (_ctl.IsActive) { StartClock(); _dock.Apply(_ctl); }
-            }
-            catch (Exception ex) { Log("clock: " + ex.Message); }
+            _clockTimer = IntPtr.Zero;
+            try { if (_ctl.IsActive) { StartClock(); _dock.Apply(_ctl); } }
+            catch (Exception ex) { Logger.Write("clock: " + ex.Message); }
             return 0;
         }
 
@@ -495,7 +329,7 @@ namespace Launcher
             _idle = IntPtr.Zero;
         }
 
-        // ------------------------------------------------------------------ callbacks (never let an exception cross into native code)
+        // ------------------------------------------------------------------ callbacks
 
         private static byte OnFrame(IntPtr data)
         {
@@ -510,39 +344,22 @@ namespace Launcher
                 if (_ctl.Phase == Phase.Hidden)
                 {
                     Efl.evas_object_hide(_win);
-                    // The fade has already rendered on earlier frames; a slow platform launch cannot freeze it.
                     AppEntry pending = _pendingLaunch;
                     _pendingLaunch = null;
-                    if (pending != null)
-                    {
-                        // A tuner switch has to go out even when the entry also names an app:
-                        // HDMI stays put if only the app is launched.
-                        if (pending.SourceType >= 0) SwitchSource(pending);
-                        if (pending.AppId != null || pending.Key != null || pending.SourceType < 0) Launch(pending);
-                    }
+                    if (pending != null) LauncherSvc.Execute(pending);
                 }
                 if (_perf) PerfSample(dt, (Stopwatch.GetTimestamp() - t0) * 1000.0 / Stopwatch.Frequency, !more);
                 if (more) return 1;
             }
-            catch (Exception ex) { Log("frame: " + ex); }
-            _anim = IntPtr.Zero;   // returning 0 makes ecore free the animator
+            catch (Exception ex) { Logger.Write("frame: " + ex); }
+            _anim = IntPtr.Zero;
             return 0;
         }
-
-        // ------------------------------------------------------------------ --perf: frame-time probe (off by default)
-
-        // Per animation: how far apart the frames really are (vsync is 16.7 ms) and how long our own callback took.
-        // Preallocated, so measuring does not allocate; one log line when the animation ends.
-        private static bool _perf;
-        private static string _perfWhy = "?";
-        private static int _perfN;
-        private static readonly double[] PerfDt = new double[2048], PerfWork = new double[2048];
 
         private static void PerfSample(double dt, double workMs, bool last)
         {
             if (_perfN < PerfDt.Length) { PerfDt[_perfN] = dt * 1000.0; PerfWork[_perfN] = workMs; _perfN++; }
             if (!last) return;
-            // The first frame's dt is made up (the animator has just been created): left out of the intervals.
             double min = double.MaxValue, max = 0, sum = 0, wmax = 0, wsum = 0; int over = 0, n = 0, worst = 0;
             for (int i = 0; i < _perfN; i++)
             {
@@ -555,40 +372,22 @@ namespace Launcher
                 if (d > 30.0) over++;
                 sum += d; n++;
             }
-            Log(string.Format(System.Globalization.CultureInfo.InvariantCulture,
+            Logger.Write(string.Format(CultureInfo.InvariantCulture,
                 "perf {0}: frames={1} interval ms min/avg/max={2:0.0}/{3:0.0}/{4:0.0} over30ms={5} (worst at frame {8}) work ms avg/max={6:0.00}/{7:0.00}",
                 _perfWhy, _perfN, n > 0 ? min : 0, n > 0 ? sum / n : 0, max, over, _perfN > 0 ? wsum / _perfN : 0, wmax, worst));
             _perfN = 0;
         }
 
-        // By default a client waits on the output's real vblank. On this TV that tick follows the content on screen: 50/s
-        // over 50 Hz live TV, 60/s over a 60 Hz source (counters in `tdm-monitor -vblank_list`, measured). Over a 60 Hz
-        // source the dock then sees a steady 16.7 ms. Asking tdm-monitor for another rate swaps in a millisecond timer
-        // that is not tied to the vsync (62 -> 16.1 ms with jitter, beating against 60 Hz). So the default is off (0);
-        // --vblank-fps N (30..120) stays for experiments. Samsung's own tdm-monitor sets it for this process only and
-        // the setting goes away with the process.
-        private static int _vblankFps = 0;
-        private static readonly Efl.TaskCb FpsCb = OnFps;
-
-        // The client vblank only exists once an animator has run, so one frame is run at start (the window is mapped
-        // then) and the rate is set right after it.
         private static byte OnFps(IntPtr data)
         {
             try
             {
-                // Both numbers are integers made here: nothing from outside reaches the command line.
                 int rc = Libc.system("/usr/bin/tdm-monitor -vblank_fps " + Libc.getpid() + "@" + _vblankFps + " >/dev/null 2>&1");
-                Log("vblank " + _vblankFps + " fps for this process, rc=" + rc);
+                Logger.Write("vblank " + _vblankFps + " fps for this process, rc=" + rc);
             }
-            catch (Exception ex) { Log("vblank fps: " + ex.Message); }
+            catch (Exception ex) { Logger.Write("vblank fps: " + ex.Message); }
             return 0;
         }
-
-        // The very first map of the window (wayland surface, GL context, first buffer) takes ~90 ms, which used to land
-        // inside the first entrance animation. The window is mapped once at start, fully transparent, and unmapped
-        // half a second later unless the dock has been shown in the meantime.
-        private static IntPtr _premapTimer;
-        private static readonly Efl.TaskCb PremapCb = OnPremap;
 
         private static byte OnPremap(IntPtr data)
         {
@@ -601,16 +400,16 @@ namespace Launcher
                     _dock.Apply(_ctl);
                     Efl.evas_object_hide(_win);
                 }
-                Log("window pre-mapped and released");
+                Logger.Write("window pre-mapped and released");
             }
-            catch (Exception ex) { Log("premap: " + ex.Message); }
+            catch (Exception ex) { Logger.Write("premap: " + ex.Message); }
             return 0;
         }
 
         private static byte OnIdle(IntPtr data)
         {
-            _idle = IntPtr.Zero;   // returning 0 makes ecore free the timer
-            try { HideDock(); } catch (Exception ex) { Log("idle: " + ex); }
+            _idle = IntPtr.Zero;
+            try { HideDock(); } catch (Exception ex) { Logger.Write("idle: " + ex); }
             return 0;
         }
 
@@ -618,16 +417,22 @@ namespace Launcher
         {
             try
             {
-                // Evas_Event_Key_Down starts with `const char *keyname`.
                 string key = Marshal.PtrToStringAnsi(Marshal.ReadIntPtr(eventInfo));
                 if (Navigation.IsEcho(key, Efl.ecore_time_get())) return;
                 HandleKey(key);
             }
-            catch (Exception ex) { Log("key: " + ex); }
+            catch (Exception ex) { Logger.Write("key: " + ex); }
         }
 
-        /// <summary>A navigation key read straight from the input device, acted on only while the dock is up.</summary>
-        private static void NavFromInput(int code)
+        private static void OnRawHome()
+        {
+            _perfWhy = "home";
+            if (_homeLaunch != null) { LauncherSvc.LaunchApp(_homeLaunch); LauncherSvc.ArmGuard(); return; }
+            if (_ctl.IsActive) HideDock(); else ShowDock();
+            LauncherSvc.ArmGuard();
+        }
+
+        private static void OnRawNav(int code)
         {
             string key = Navigation.Press(code, _ctl.IsActive, Efl.ecore_time_get());
             if (key != null) HandleKey(key);
@@ -641,6 +446,7 @@ namespace Launcher
                 switch (_ctl.Key(key, out index))
                 {
                     case KeyAction.Moved:
+                        SoundPlayer.Play(SoundEffect.Move);
                         _perfWhy = "move";
                         StartAnimator();
                         ResetIdle();
@@ -658,19 +464,21 @@ namespace Launcher
                         if (key == "XF86Home")
                         {
                             double now = Efl.ecore_time_get();
-                            if (now - _lastRawHome < HomeEchoSeconds) { Log("home echo ignored " + ((now - _lastRawHome) * 1000).ToString("0") + " ms after the press"); break; }
-                            _lastHome = now;
+                            if (now - _input.LastRawHome < HomeEchoSeconds)
+                            {
+                                Logger.Write("home echo ignored " + ((now - _input.LastRawHome) * 1000).ToString("0") + " ms after the press");
+                                break;
+                            }
+                            _input.LastHome = now;
                             HideDock();
-                            // Home reached the dock through evas and not through evdev: the evdev path, which arms the guard,
-                            // will count this press as already handled (_lastHome), so it is armed here.
-                            ArmGuard();
+                            LauncherSvc.ArmGuard();
                             break;
                         }
                         HideDock();
                         break;
                 }
             }
-            catch (Exception ex) { Log("key: " + ex); }
+            catch (Exception ex) { Logger.Write("key: " + ex); }
         }
 
         private static byte OnFifo(IntPtr data, IntPtr handler)
@@ -683,7 +491,7 @@ namespace Launcher
                     if (n <= 0) break;
                     foreach (Command c in Commands.Feed(ReadBuf, (int)n))
                     {
-                        Log("command " + c);
+                        Logger.Write("command " + c);
                         switch (c)
                         {
                             case Command.Show: _perfWhy = "fifo-show"; ShowDock(); break;
@@ -693,206 +501,25 @@ namespace Launcher
                     }
                 }
             }
-            catch (Exception ex) { Log("fifo: " + ex); }
+            catch (Exception ex) { Logger.Write("fifo: " + ex); }
             return 1;
         }
 
-        private static byte OnInput(IntPtr data, IntPtr handler)
-        {
-            try
-            {
-                int index = (int)data;
-                if (index < 0 || index >= _inputFds.Count || _inputFds[index] < 0) return 1;
-                for (int round = 0; round < 8; round++)
-                {
-                    long n = (long)Libc.read(_inputFds[index], InputBuf, (UIntPtr)InputBuf.Length);
-                    if (n < 0 && Marshal.GetLastWin32Error() != EAgain) { DropNode(index); break; }
-                    if (n <= 0) break;
-                    InputPresses.Clear();
-                    _inputReaders[index].Feed(InputBuf, (int)n, InputPresses);
-                    for (int k = 0; k < InputPresses.Count; k++)
-                    {
-                        int code = InputPresses[k];
-                        if (_learn) Log("key code " + code);
-                        if (code != _homeCode) { NavFromInput(code); continue; }
-                        double now = Efl.ecore_time_get();
-                        // The focused dock also gets XF86Home through evas and hides itself: count it once.
-                        if (now - _lastHome < HomeDebounceSeconds) continue;
-                        _lastHome = now;
-                        _lastRawHome = now;
-                        _perfWhy = "home";
-                        if (_homeLaunch != null) { LaunchApp(_homeLaunch); ArmGuard(); continue; }
-                        if (_ctl.IsActive) HideDock(); else ShowDock();
-                        ArmGuard();
-                    }
-                }
-            }
-            catch (Exception ex) { Log("input: " + ex); }
-            return 1;
-        }
-
-        private static void ArmGuard()
-        {
-            if (_guardApps == null) return;
-            try
-            {
-                NewGuardGeneration();
-                Libc.system(HomeGuard.Command(_guardApps, _guardFile, _guardGen));   // returns at once: the shell puts the whole chain in the background
-            }
-            catch (Exception ex) { Log("guard: " + ex.Message); }
-        }
-
-        /// <summary>Retires every kill that is still waiting: the guarded app was asked for on purpose.</summary>
-        private static void CancelGuard()
-        {
-            if (_guardApps == null) return;
-            try { NewGuardGeneration(); Log("guard: cancelled, " + string.Join(",", _guardApps) + " was asked for"); }
-            catch (Exception ex) { Log("guard cancel: " + ex.Message); }
-        }
-
-        private static void NewGuardGeneration()
-        {
-            _guardGen++;
-            File.WriteAllText(_guardFile, _guardGen.ToString(System.Globalization.CultureInfo.InvariantCulture));
-        }
-
-        // ------------------------------------------------------------------ launching
-
-        private static bool SendLaunch(string appId)
-        {
-            IntPtr ac;
-            if (Efl.app_control_create(out ac) != 0) return false;
-            try
-            {
-                Efl.app_control_set_app_id(ac, appId);
-                return Efl.app_control_send_launch_request(ac, IntPtr.Zero, IntPtr.Zero) == 0;
-            }
-            finally { Efl.app_control_destroy(ac); }
-        }
-
-        /// <summary>OK on an entry: open a page, switch input, or launch; everything but a page closes the dock.</summary>
         private static void Activate(AppEntry e)
         {
             if (e.Panel != null)
             {
-                if (e.Panel == "inputs") OpenInputs(); else Log("unknown panel " + e.Panel);
+                if (e.Panel == "inputs") OpenInputs(); else Logger.Write("unknown panel " + e.Panel);
                 return;
             }
-            if (HomeGuard.ShouldCancel(_guardApps, e.AppId)) CancelGuard();
-            HideDock();
+            SoundPlayer.Play(SoundEffect.Launch);
+            if (LauncherSvc.ShouldCancelGuard(e.AppId)) LauncherSvc.CancelGuard();
+            HideDock(playSound: false);
             _pendingLaunch = e;
-        }
-
-        private const string SourceIconDir = "/usr/apps/com.samsung.tv.theme-resource/shared/res/org.tizen.menu/Settings_Popup/device_icon/";
-
-        /// <summary>
-        /// Switches input the way Samsung's own Source tile does (CompSource, SourceChangeViaTVViewer):
-        /// a launch request to tv-viewer carrying the input number. tv-viewer refuses a missing icon,
-        /// so the firmware's own device icon is passed along.
-        /// </summary>
-        private static void SwitchSource(AppEntry e)
-        {
-            IntPtr ac = IntPtr.Zero;
-            try
-            {
-                if (Efl.app_control_create(out ac) != 0) { Log("source: app_control_create failed"); return; }
-                string n = e.SourceType.ToString();
-                string icon = SourceIconDir + (e.SourceType >= 13 && e.SourceType <= 16 ? "r_icon_device_s_hdmi" + (e.SourceType - 12) : "r_icon_device_s_tv") + ".png";
-                Efl.app_control_set_app_id(ac, "org.tizen.tv-viewer");
-                Efl.app_control_add_extra_data(ac, "change_source", n);
-                Efl.app_control_add_extra_data(ac, "sourceType", n);
-                Efl.app_control_add_extra_data(ac, "sourceName", e.Label);
-                Efl.app_control_add_extra_data(ac, "sourceIcon", icon);
-                Efl.app_control_add_extra_data(ac, "mbrIndex", "-2");   // SourceMbrActivityIndex.Invalid: no external-device profile
-                Efl.app_control_add_extra_data(ac, "__K_EX_LAUNCH_REQUESTOR", "user");
-                int rc = Efl.app_control_send_launch_request(ac, IntPtr.Zero, IntPtr.Zero);
-                Log("source " + e.Label + " (" + n + ") rc=" + rc);
-            }
-            catch (Exception ex) { Log("source error: " + ex.Message); }
-            finally { if (ac != IntPtr.Zero) Efl.app_control_destroy(ac); }
-        }
-
-        private const string KeyTool = "/usr/bin/input_keyevent ";
-        private static readonly Efl.TaskCb KeyTimerCb = OnKeyTimer;
-        private static AppEntry _pendingKey;
-        private static IntPtr _keyTimer;
-
-        private static void CancelPendingKey()
-        {
-            _pendingKey = null;
-            if (_keyTimer != IntPtr.Zero) { Efl.ecore_timer_del(_keyTimer); _keyTimer = IntPtr.Zero; }
-        }
-
-        // A remote key is sent only once our window is gone: while it is still mapped it would
-        // take the key itself. One-shot timer, so nothing runs while the dock is idle.
-        private static byte OnKeyTimer(IntPtr data)
-        {
-            AppEntry e = _pendingKey;
-            _pendingKey = null;
-            _keyTimer = IntPtr.Zero;   // returning 0 makes ecore free the timer
-            try
-            {
-                if (e == null) return 0;
-                int rc = Libc.system(KeyTool + e.Key);   // Key is letters and digits only (Catalog.IsKeyName)
-                Log("key " + e.Key + " rc=" + rc);
-                if (rc != 0 && e.AppId != null) LaunchApp(e);
-            }
-            catch (Exception ex) { Log("key timer: " + ex.Message); }
-            return 0;
-        }
-
-        private static void Launch(AppEntry e)
-        {
-            if (e.Key != null)
-            {
-                CancelPendingKey();   // two quick activations: the first timer must not fire with the second entry
-                _pendingKey = e;
-                _keyTimer = Efl.ecore_timer_add(0.30, KeyTimerCb, IntPtr.Zero);
-                return;
-            }
-            LaunchApp(e);
-        }
-
-        private static void LaunchApp(AppEntry e)
-        {
-            try
-            {
-                if (e.KillFirst != null && e.AppId != null)
-                {
-                    // Close the other app first, then start this one: one detached shell, so the dock does not wait.
-                    // Both ids are plain Tizen ids (Catalog.ValidAppId), safe on a command line.
-                    int rc = Libc.system("( /usr/bin/app_launcher -k " + e.KillFirst + "; sleep 0.4; /usr/bin/app_launcher -s " + e.AppId + " ) >/dev/null 2>&1 &");
-                    Log("launch " + e.AppId + " after closing " + e.KillFirst + " rc=" + rc);
-                    return;
-                }
-                if (HomeGuard.ShouldCancel(_guardApps, e.AppId)) CancelGuard();
-                if (e.SystemApp || e.AppId == "com.samsung.tv.csfs")
-                {
-                    // Samsung's Home ignores a plain app-control request from here (logged as launched, never shown);
-                    // the platform's own launcher starts it. The same goes for the other system controls (sys: rows).
-                    Log("launch " + e.AppId + " rc=" + Libc.system(SystemLaunch.Command(e.AppId, e.FallbackAppId)));
-                    return;
-                }
-                long t0 = Stopwatch.GetTimestamp();
-                bool sent = SendLaunch(e.AppId);
-                long ms = (Stopwatch.GetTimestamp() - t0) * 1000 / Stopwatch.Frequency;
-                if (sent) { Log("launch " + e.AppId + " request " + ms + " ms"); return; }
-                Log("launch failed: " + e.AppId);
-                if (e.FallbackAppId != null && SendLaunch(e.FallbackAppId)) { Log("launch " + e.FallbackAppId + " (fallback)"); return; }
-                // Last resort: the platform's command line launcher.
-                Process.Start(new ProcessStartInfo("/usr/bin/app_launcher", "-s " + (e.FallbackAppId ?? e.AppId)) { UseShellExecute = false });
-                Log("launch via app_launcher: " + (e.FallbackAppId ?? e.AppId));
-            }
-            catch (Exception ex) { Log("launch error: " + ex.Message); }
         }
 
         // ------------------------------------------------------------------ warm-up
 
-        /// <summary>
-        /// Runs each page through a show, a move right and back, and a hide while the window is still unmapped,
-        /// so the JIT has compiled the animation, layout and drawing paths before the first real show. Without
-        /// it the very first Home press pays for compiling them in the middle of the entrance animation.
-        /// </summary>
         private static void WarmUp()
         {
             long t0 = Stopwatch.GetTimestamp();
@@ -912,7 +539,7 @@ namespace Launcher
                 WarmFrames(c, d, 14);
                 c.Reset();
             }
-            Log("warm-up " + ((Stopwatch.GetTimestamp() - t0) * 1000.0 / Stopwatch.Frequency).ToString("0") + " ms");
+            Logger.Write("warm-up " + ((Stopwatch.GetTimestamp() - t0) * 1000.0 / Stopwatch.Frequency).ToString("0") + " ms");
         }
 
         private static void WarmFrames(Controller c, Dock d, int frames)
@@ -922,10 +549,6 @@ namespace Launcher
 
         // ------------------------------------------------------------------ entry point
 
-        /// <summary>
-        /// <c>--get-home</c>: prints which app the TV launches for the Home key and exits. A read-only look
-        /// at the default Home, to see whether the platform answers this call on a given TV.
-        /// </summary>
         private static int GetHome()
         {
             try
@@ -943,25 +566,26 @@ namespace Launcher
         {
             if (Flag(args, "--get-home")) return GetHome();
             _perf = Flag(args, "--perf");
-            // --no-motion (Reduce motion): show, hide, page changes and navigation are immediate; no icon zoom or lift.
             if (Flag(args, "--no-motion")) { Controller.Instant = true; DockLayout.Grow = false; DockLayout.GlowFromIcon = false; }
             _dir = ResolveDir(args);
-            _logPath = Path.Combine(_dir, "tvlauncher.log");
             _pidPath = Path.Combine(_dir, "tvlauncher.pid");
             _fifoPath = Path.Combine(_dir, "tvlauncher.fifo");
-            TrimLog();
+            Logger.Init(Path.Combine(_dir, "tvlauncher.log"));
 
             if (!AcquireInstance()) return 0;
-            AppDomain.CurrentDomain.ProcessExit += (s, e) => CleanupFiles();
+            AppDomain.CurrentDomain.ProcessExit += (s, e) => { SoundPlayer.Shutdown(); CleanupFiles(); };
 
             try
             {
                 string engine = SetupEnvironment();
-                Log("start pid=" + Libc.getpid() + " uid=" + Libc.getuid() + " engine=" + engine);
+                Logger.Write("start pid=" + Libc.getpid() + " uid=" + Libc.getuid() + " engine=" + engine);
+
+                string res = Path.Combine(AppContext.BaseDirectory, "res");
+                SoundPlayer.Init(Path.Combine(res, "sounds"), Logger.Write, Flag(args, "--no-sound"));
 
                 Efl.elm_init(0, IntPtr.Zero);
                 _win = Efl.elm_win_add(IntPtr.Zero, "tvlauncher", Efl.ElmWinNotification);
-                if (_win == IntPtr.Zero) { Log("elm_win_add failed"); return 2; }
+                if (_win == IntPtr.Zero) { Logger.Write("elm_win_add failed"); return 2; }
 
                 int sx, sy, sw, sh;
                 Efl.elm_win_screen_size_get(_win, out sx, out sy, out sw, out sh);
@@ -973,12 +597,10 @@ namespace Launcher
                     int fw, fh;
                     if (wh.Length == 2 && int.TryParse(wh[0], out fw) && int.TryParse(wh[1], out fh)) { screenW = fw; screenH = fh; }
                 }
-                // The compositor works in 1920x1080 on the Q80A even though the panel is 4K; the
-                // size it reports is logged so a different model can be spotted and overridden.
-                Log("screen reported " + sw + "x" + sh + ", layout " + screenW + "x" + screenH);
+                Logger.Write("screen reported " + sw + "x" + sh + ", layout " + screenW + "x" + screenH);
 
-                _apps = LoadApps(Arg(args, "--apps") ?? Path.Combine(AppContext.BaseDirectory, "res", "apps.tsv"));
-                _inputs = LoadList(Arg(args, "--inputs") ?? Path.Combine(AppContext.BaseDirectory, "res", "inputs.tsv"), Catalog.BuiltInInputs);
+                _apps = LoadApps(Arg(args, "--apps") ?? Path.Combine(res, "apps.tsv"));
+                _inputs = LoadList(Arg(args, "--inputs") ?? Path.Combine(res, "inputs.tsv"), Catalog.BuiltInInputs);
                 int leftPins = Catalog.LeftPinCount(_apps);
                 int group = Catalog.GroupStart(_apps);
                 var layout = new DockLayout(_apps.Length, screenW, screenH, 0, false, group, leftPins, true);
@@ -993,57 +615,54 @@ namespace Launcher
                 Efl.elm_win_prop_focus_skip_set(_win, false);
                 int level = Efl.efl_util_set_notification_window_level(_win, NotificationLevelTop);
                 Efl.elm_win_layer_set(_win, WindowLayer);
-                // Without this hint the compositor may ignore our geometry for a notification window.
                 Efl.elm_win_aux_hint_add(_win, "wm.policy.win.user.geometry", "1");
                 Efl.elm_win_aux_hint_add(_win, "wm.comp.win.effect.enable", "0");
                 Efl.evas_object_move(_win, layout.WinX, layout.WinY);
                 Efl.evas_object_resize(_win, layout.WinW, layout.WinH);
-                Log("window " + layout.WinW + "x" + layout.WinH + " at " + layout.WinX + "," + layout.WinY + " notification-level=" + level);
+                Logger.Write("window " + layout.WinW + "x" + layout.WinH + " at " + layout.WinX + "," + layout.WinY + " notification-level=" + level);
 
-                string res = Path.Combine(AppContext.BaseDirectory, "res");
                 string dumpIcons = Arg(args, "--dump-icons");
                 if (dumpIcons != null && Directory.Exists(dumpIcons)) Dock.DumpIconsTo = dumpIcons;
                 Weather.LoadCache();
-                try { Weather.Refresh().Wait(5000); } catch (Exception ex) { Log("weather wait: " + ex.Message); }
-                Log("weather " + (Weather.Text ?? "none") + (Weather.LastError != null ? " (" + Weather.LastError + ")" : ""));
-                _appsDock = new Dock(_win, layout, _apps, res, Log, Design.HintText, true);
+                try { Weather.Refresh().Wait(5000); } catch (Exception ex) { Logger.Write("weather wait: " + ex.Message); }
+                Logger.Write("weather " + (Weather.Text ?? "none") + (Weather.LastError != null ? " (" + Weather.LastError + ")" : ""));
+
+                _appsDock = new Dock(_win, layout, _apps, res, Logger.Write, Design.HintText, true);
                 _appsDock.Build();
-                _inputsDock = new Dock(_win, inputsLayout, _inputs, res, Log, "Back", false);
+                _inputsDock = new Dock(_win, inputsLayout, _inputs, res, Logger.Write, "Back", false);
                 _inputsDock.Build();
                 _inputsDock.SetVisible(false);
                 _dock = _appsDock;
                 if (!Flag(args, "--no-warmup")) WarmUp();
                 _appsDock.Apply(_appsCtl);
                 _inputsDock.Apply(_inputsCtl);
-                Log("engine in use: " + (Efl.EngineName(_dock.Evas) ?? "unknown") + ", " + _apps.Length + " apps, " + _inputs.Length + " inputs, "
+                Logger.Write("engine in use: " + (Efl.EngineName(_dock.Evas) ?? "unknown") + ", " + _apps.Length + " apps, " + _inputs.Length + " inputs, "
                     + (_appsDock.MissingIcons + _inputsDock.MissingIcons) + " icons missing");
 
                 Efl.evas_object_event_callback_add(_win, Efl.EvasCallbackKeyDown, KeyCb, IntPtr.Zero);
                 SetupFifo();
-                string guard = Arg(args, "--kill-on-home");
-                if (guard != null)
-                {
-                    _guardApps = HomeGuard.Parse(guard);
-                    if (_guardApps != null) { _guardFile = Path.Combine(_dir, "tvlauncher.guard"); Log("guard: " + guard + " is closed after each Home press (until it is asked for): " + HomeGuard.Command(_guardApps, _guardFile, 0)); }
-                    else Log("guard: bad app id ignored");
-                }
+                LauncherSvc.ConfigureGuard(Arg(args, "--kill-on-home"), _dir);
+
                 string homeLaunch = Arg(args, "--home-launch");
                 if (homeLaunch != null)
                 {
                     _homeLaunch = HomeLaunch.Parse(homeLaunch);
-                    Log(_homeLaunch != null ? "home key launches " + homeLaunch + "; the dock is not shown" : "home-launch: bad app id ignored");
+                    Logger.Write(_homeLaunch != null ? "home key launches " + homeLaunch + "; the dock is not shown" : "home-launch: bad app id ignored");
                 }
-                SetupInput(args);
+
+                _input = new InputWatcher(OnRawHome, OnRawNav);
+                _input.Start(Arg(args, "--home-code") ?? Environment.GetEnvironmentVariable("TVLAUNCHER_HOME_CODE"), Flag(args, "--learn"));
 
                 string fpsArg = Arg(args, "--vblank-fps");
                 int fps;
                 if (fpsArg != null && int.TryParse(fpsArg, out fps) && (fps == 0 || (fps >= 30 && fps <= 120))) _vblankFps = fps;
                 if (_vblankFps > 0 && File.Exists("/usr/bin/tdm-monitor")) Efl.ecore_animator_add(FpsCb, IntPtr.Zero);
-                Log("animator frame time " + (Efl.ecore_animator_frametime_get() * 1000.0).ToString("0.0", System.Globalization.CultureInfo.InvariantCulture) + " ms");
+                Logger.Write("animator frame time " + (Efl.ecore_animator_frametime_get() * 1000.0).ToString("0.0", CultureInfo.InvariantCulture) + " ms");
+
                 if (!Flag(args, "--hidden")) ShowDock();
                 else if (!Flag(args, "--no-premap"))
                 {
-                    _appsCtl.HoldFaint(0.012f);   // about 1% opacity: invisible, but drawn, so the shaders get compiled now
+                    _appsCtl.HoldFaint(0.012f);
                     _appsDock.Apply(_appsCtl);
                     Efl.evas_object_show(_win);
                     if (Flag(args, "--premap-activate")) Efl.elm_win_activate(_win);
@@ -1052,14 +671,14 @@ namespace Launcher
 
                 GC.Collect();
                 GC.WaitForPendingFinalizers();
-                Log("elm_run");
+                Logger.Write("elm_run");
                 Efl.elm_run();
-                Log("elm_run returned");
+                Logger.Write("elm_run returned");
                 Efl.elm_shutdown();
             }
             catch (Exception ex)
             {
-                Log("fatal: " + ex);
+                Logger.Write("fatal: " + ex);
                 return 1;
             }
             return 0;

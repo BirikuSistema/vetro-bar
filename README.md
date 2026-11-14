@@ -15,13 +15,20 @@ Fuera de la pastilla:
 - tiempo de Valladolid a la izquierda (Open-Meteo)
 - reloj 24 h a la derecha
 
+Sonidos de interfaz (48 kHz PCM vía PulseAudio en memoria, desactivables con `--no-sound`):
+
+- `res/sounds/open.wav` al mostrar el dock
+- `res/sounds/close.wav` al ocultarlo
+- `res/sounds/move.wav` al desplazarse entre tiles
+- `res/sounds/launch.wav` al lanzar una app
+
 No hay página Sources ni tiles HDMI. El icono de Steam de la tele no se toca.
 
 ## Layout
 
-- `src/` el dock. `Core/` es lógica pura (layout, catálogo, tiempo) y tiene tests; `Native/` es P/Invoke; `Ui/` dibuja con EFL.
+- `src/` el dock. `Core/` es lógica pura (layout, catálogo, tiempo, WAV) y tiene tests; `Host/` gestiona entrada evdev, lanzamiento de apps y log; `Native/` es P/Invoke (EFL, libc, PulseAudio); `Ui/` dibuja con EFL.
 - `tests/` tests de escritorio: `dotnet run --project tests`.
-- `res/` imágenes (barra, glow, anillo, iconos de sistema, `weather/`).
+- `res/` imágenes y sonidos (`icons/`, `weather/`, `sounds/`).
 - `tools/` generadores (`system_icons.py`, `make-glass.cjs`).
 - `apply.sh` / `restore.sh` / `status.sh` overlay en la tele.
 

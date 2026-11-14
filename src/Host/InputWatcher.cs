@@ -1,0 +1,147 @@
+using System;
+using System.Collections.Generic;
+using System.IO;
+using System.Runtime.InteropServices;
+using Launcher.Core;
+using Launcher.Native;
+
+namespace Launcher.Host
+{
+    /// <summary>
+    /// Watches the remote control's evdev nodes read-only through ecore fd handlers,
+    /// handling hot-plug rescans, Home-key debouncing, and raw navigation presses.
+    /// </summary>
+    internal sealed class InputWatcher
+    {
+        private const double RescanSeconds = 3.0;
+        private const double HomeDebounceSeconds = 0.35;
+        private const int EAgain = 11;
+
+        private readonly List<int> _fds = new List<int>();
+        private readonly List<EvdevReader> _readers = new List<EvdevReader>();
+        private readonly List<string> _paths = new List<string>();
+        private readonly List<IntPtr> _handlers = new List<IntPtr>();
+        private readonly HashSet<string> _openFailed = new HashSet<string>();
+        private readonly byte[] _buf = new byte[16 * 32];
+        private readonly List<int> _presses = new List<int>();
+
+        private readonly Efl.FdCb _inputCb;
+        private readonly Efl.TaskCb _rescanCb;
+        private readonly Action _onHome;
+        private readonly Action<int> _onNav;
+
+        private IntPtr _rescanTimer;
+        private bool _listFailed;
+        private int _homeCode = -1;
+        private bool _learn;
+        private double _lastHome = -100;
+
+        public double LastRawHome { get; private set; } = -100;
+        public double LastHome { get { return _lastHome; } set { _lastHome = value; } }
+
+        public InputWatcher(Action onHome, Action<int> onNav)
+        {
+            _onHome = onHome;
+            _onNav = onNav;
+            _inputCb = OnInput;
+            _rescanCb = OnRescan;
+        }
+
+        public void Start(string homeCodeArg, bool learn)
+        {
+            int code;
+            if (homeCodeArg != null && int.TryParse(homeCodeArg, out code) && code > 0 && code < 768) _homeCode = code;
+            _learn = learn;
+            if (_homeCode < 0 && !_learn) return;
+
+            WatchNewNodes();
+            Logger.Write("home key code " + (_homeCode < 0 ? "not set" : _homeCode.ToString()) + (_learn ? ", learn mode (every key press is logged)" : ""));
+            _rescanTimer = Efl.ecore_timer_add(RescanSeconds, _rescanCb, IntPtr.Zero);
+        }
+
+        private int WatchNewNodes()
+        {
+            List<string> nodes;
+            try { nodes = InputDevices.RemoteNodes(File.ReadAllText("/proc/bus/input/devices")); }
+            catch (Exception ex) { if (!_listFailed) Logger.Write("input: cannot list devices: " + ex.Message); _listFailed = true; return 0; }
+            _listFailed = false;
+
+            int added = 0;
+            foreach (string node in nodes)
+            {
+                if (_paths.Contains(node)) continue;
+                int fd = Libc.open(node, Libc.O_RDONLY | Libc.O_NONBLOCK);
+                if (fd < 0)
+                {
+                    if (_openFailed.Add(node)) Logger.Write("input: cannot open " + node + " errno=" + Marshal.GetLastWin32Error());
+                    continue;
+                }
+                _openFailed.Remove(node);
+
+                int index = _fds.IndexOf(-1);
+                bool reuse = index >= 0;
+                if (!reuse) index = _fds.Count;
+                IntPtr handler = Efl.ecore_main_fd_handler_add(fd, Efl.EcoreFdRead, _inputCb, (IntPtr)index, IntPtr.Zero, IntPtr.Zero);
+                if (handler == IntPtr.Zero) { Libc.close(fd); Logger.Write("input: cannot watch " + node); continue; }
+
+                if (reuse) { _fds[index] = fd; _readers[index] = new EvdevReader(); _paths[index] = node; _handlers[index] = handler; }
+                else { _fds.Add(fd); _readers.Add(new EvdevReader()); _paths.Add(node); _handlers.Add(handler); }
+                added++;
+                Logger.Write("input: watching " + node);
+            }
+            return added;
+        }
+
+        private byte OnRescan(IntPtr data)
+        {
+            try { WatchNewNodes(); }
+            catch (Exception ex) { Logger.Write("input: rescan: " + ex.Message); }
+            return 1;
+        }
+
+        private void DropNode(int index)
+        {
+            if (_fds[index] < 0) return;
+            Logger.Write("input: lost " + _paths[index]);
+            if (_handlers[index] != IntPtr.Zero) Efl.ecore_main_fd_handler_del(_handlers[index]);
+            Libc.close(_fds[index]);
+            _fds[index] = -1;
+            _handlers[index] = IntPtr.Zero;
+            _paths[index] = null;
+        }
+
+        private byte OnInput(IntPtr data, IntPtr handler)
+        {
+            try
+            {
+                int index = (int)data;
+                if (index < 0 || index >= _fds.Count || _fds[index] < 0) return 1;
+                for (int round = 0; round < 8; round++)
+                {
+                    long n = (long)Libc.read(_fds[index], _buf, (UIntPtr)_buf.Length);
+                    if (n < 0 && Marshal.GetLastWin32Error() != EAgain) { DropNode(index); break; }
+                    if (n <= 0) break;
+                    _presses.Clear();
+                    _readers[index].Feed(_buf, (int)n, _presses);
+                    for (int k = 0; k < _presses.Count; k++)
+                    {
+                        int code = _presses[k];
+                        if (_learn) Logger.Write("key code " + code);
+                        if (code != _homeCode)
+                        {
+                            _onNav(code);
+                            continue;
+                        }
+                        double now = Efl.ecore_time_get();
+                        if (now - _lastHome < HomeDebounceSeconds) continue;
+                        _lastHome = now;
+                        LastRawHome = now;
+                        _onHome();
+                    }
+                }
+            }
+            catch (Exception ex) { Logger.Write("input: " + ex); }
+            return 1;
+        }
+    }
+}

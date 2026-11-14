@@ -127,6 +127,23 @@ namespace Launcher.Tests
                 }
                 finally { Directory.Delete(dir, true); }
             });
+
+            T.Run("wav parser: rejects invalid headers and accepts 48kHz 16-bit stereo sounds", () =>
+            {
+                WavInfo info;
+                T.True(!WavParser.TryParse(null, out info), "null rejected");
+                T.True(!WavParser.TryParse(new byte[16], out info), "short buffer rejected");
+                string sounds = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "../../../../res/sounds"));
+                foreach (string name in new[] { "open.wav", "close.wav", "move.wav", "launch.wav" })
+                {
+                    byte[] raw = File.ReadAllBytes(Path.Combine(sounds, name));
+                    T.True(WavParser.TryParse(raw, out info), name + " parses");
+                    T.Eq(info.SampleRate, 48000, name + " sample rate");
+                    T.Eq(info.Channels, 2, name + " channels");
+                    T.Eq(info.BitsPerSample, 16, name + " bits per sample");
+                    T.True(info.DataLength > 0 && info.DataOffset + info.DataLength <= raw.Length, name + " data bounds");
+                }
+            });
         }
     }
 }
