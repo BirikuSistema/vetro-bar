@@ -275,19 +275,50 @@ namespace Launcher
 
         // ------------------------------------------------------------------ clock / weather
 
-        private static readonly string[] DayNames = { "Domingo", "Lunes", "Martes", "Miércoles", "Jueves", "Viernes", "Sábado" };
-        private static readonly string[] MonthNames = { "Enero", "Febrero", "Marzo", "Abril", "Mayo", "Junio", "Julio", "Agosto", "Septiembre", "Octubre", "Noviembre", "Diciembre" };
+        private static string ClockText() { return Localization.ClockText(DateTime.Now); }
 
-        private static string ClockText() { return DateTime.Now.ToString("HH:mm"); }
+        private static string DayText() { return Localization.DayText(DateTime.Now); }
 
-        private static string DayText()
+        /// <summary>Language, region and clock format: command line, then environment, then vetro-bar.conf, then the TV's own settings.</summary>
+        private static void SetupLocalization(string[] args)
         {
-            DateTime n = DateTime.Now;
-            return DayNames[(int)n.DayOfWeek] + " " + n.Day + " de " + MonthNames[n.Month - 1];
+            var user = new Settings();
+            string[] keys = { "language", "location", "clock", "units" };
+            string[] flags = { "--lang", "--location", "--clock", "--units" };
+            string[] envs = { "TVLAUNCHER_LANG", "TVLAUNCHER_LOCATION", "TVLAUNCHER_CLOCK", "TVLAUNCHER_UNITS" };
+            for (int i = 0; i < keys.Length; i++)
+            {
+                string v = Arg(args, flags[i]) ?? Environment.GetEnvironmentVariable(envs[i]);
+                if (v != null && !user.Set(keys[i], v)) Logger.Write("settings: ignored " + keys[i] + "=" + v);
+            }
+            try
+            {
+                string conf = Path.Combine(Weather.CacheDir, "vetro-bar.conf");
+                if (File.Exists(conf)) user.Fill(Settings.Parse(File.ReadAllText(conf)));
+            }
+            catch (Exception ex) { Logger.Write("settings: " + ex.Message); }
+
+            string tvLanguage = TvString("db/menu_widget/language") ?? Environment.GetEnvironmentVariable("LANG");
+            Localization.Configure(tvLanguage, TvString("db/comss/countrycode"), user);
+            if (user.HasLocation) Weather.UseLocation(user.Latitude, user.Longitude);
+            Logger.Write("locale: language=" + Localization.Language + " country=" + (Localization.Country ?? "?")
+                + " clock=" + (Localization.Is12Hour ? "12h" : "24h") + " units=" + (Localization.Fahrenheit ? "F" : "C")
+                + " weather=" + (user.HasLocation ? "fixed location" : "from IP address"));
+        }
+
+        private static string TvString(string key)
+        {
+            try
+            {
+                IntPtr p = Efl.vconf_get_str(key);
+                return p == IntPtr.Zero ? null : Marshal.PtrToStringAnsi(p);
+            }
+            catch (Exception) { return null; }
         }
 
         private static void StartClock()
         {
+            TimeZoneInfo.ClearCachedData();   // the TV's time zone or daylight saving may have changed while the dock slept
             string t = ClockText();
             string day = DayText();
             _appsDock.SetClock(t);
@@ -678,6 +709,8 @@ namespace Launcher
 
                 string dumpIcons = Arg(args, "--dump-icons");
                 if (dumpIcons != null && Directory.Exists(dumpIcons)) Dock.DumpIconsTo = dumpIcons;
+                Weather.Init(_dir);
+                SetupLocalization(args);
                 Weather.LoadCache();
                 try { Weather.Refresh(); } catch (Exception ex) { Logger.Write("weather refresh: " + ex.Message); }
                 Logger.Write("weather " + (Weather.Text ?? "none") + (Weather.LastError != null ? " (" + Weather.LastError + ")" : ""));

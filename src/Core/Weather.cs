@@ -7,11 +7,26 @@ using System.Threading.Tasks;
 
 namespace Launcher.Core
 {
-    /// <summary>Valladolid current weather via Open-Meteo. The dock only reads <see cref="Text"/> / <see cref="Icon"/>.</summary>
+    /// <summary>
+    /// Current weather via Open-Meteo for wherever the TV is. The place comes from, in order: a location the user
+    /// set, the last one found, or a lookup of the public IP address (about city accuracy, refreshed daily).
+    /// The dock only reads <see cref="Text"/> / <see cref="Icon"/>.
+    /// </summary>
     internal static class Weather
     {
-        public const string CachePath = "/opt/usr/home/owner/share/vetro-weather.json";
-        const string Url = "https://api.open-meteo.com/v1/forecast?latitude=41.652&longitude=-4.728&current=temperature_2m,weather_code&daily=temperature_2m_max,temperature_2m_min&timezone=Europe%2FMadrid";
+        const string DefaultDir = "/opt/usr/home/owner/share";
+        const double LocationMaxAgeHours = 24;
+        const string Forecast = "https://api.open-meteo.com/v1/forecast?current=temperature_2m,weather_code&daily=temperature_2m_max,temperature_2m_min&timezone=auto";
+        // Both answer with the same field names, so one parser serves them.
+        static readonly string[] GeoServices = { "https://ipwho.is/", "https://ipapi.co/json/" };
+
+        /// <summary>Where the weather and location caches live; <see cref="Init"/> moves it when the default is missing.</summary>
+        public static string CacheDir = DefaultDir;
+        static string CachePath { get { return Path.Combine(CacheDir, "vetro-weather.json"); } }
+        static string LocationPath { get { return Path.Combine(CacheDir, "vetro-location.txt"); } }
+
+        static bool _manual;
+        static double _manualLat, _manualLon;
 
         public static string Text;
         /// <summary>Today's low and high, for the small line under the reading. Null until both arrive.</summary>
@@ -19,6 +34,17 @@ namespace Launcher.Core
         public static string Icon = "cloud";
         public static string LastError;
         public static DateTime UpdatedUtc;
+
+        public static void Init(string fallbackDir)
+        {
+            if (!Directory.Exists(CacheDir)) CacheDir = fallbackDir;
+        }
+
+        /// <summary>Fixes the place; no IP lookup is made.</summary>
+        public static void UseLocation(double latitude, double longitude)
+        {
+            _manual = true; _manualLat = latitude; _manualLon = longitude;
+        }
 
         public static void LoadCache()
         {
@@ -35,7 +61,9 @@ namespace Launcher.Core
             {
                 try
                 {
-                    string json = FetchCurl() ?? FetchHttp();
+                    string url = ForecastUrl();
+                    if (url == null) { LastError = "no location"; return; }
+                    string json = Fetch(url);
                     if (Apply(json))
                     {
                         try { File.WriteAllText(CachePath, json); } catch { /* ignore */ }
@@ -45,13 +73,92 @@ namespace Launcher.Core
             });
         }
 
-        static string FetchCurl()
+        internal static string BuildUrl(double lat, double lon, bool fahrenheit)
+        {
+            return Forecast + "&latitude=" + lat.ToString("0.###", CultureInfo.InvariantCulture)
+                + "&longitude=" + lon.ToString("0.###", CultureInfo.InvariantCulture)
+                + (fahrenheit ? "&temperature_unit=fahrenheit" : "");
+        }
+
+        static string ForecastUrl()
+        {
+            double lat, lon;
+            if (_manual) { lat = _manualLat; lon = _manualLon; }
+            else if (!ResolveLocation(out lat, out lon)) return null;
+            return BuildUrl(lat, lon, Localization.Fahrenheit);
+        }
+
+        static bool ResolveLocation(out double lat, out double lon)
+        {
+            double cLat = 0, cLon = 0; string cCountry = null; DateTime cTime = DateTime.MinValue;
+            bool have = ReadLocation(out cLat, out cLon, out cCountry, out cTime);
+            if (have && cCountry != null) Localization.SetCountry(cCountry);
+            if (have && (DateTime.UtcNow - cTime).TotalHours < LocationMaxAgeHours) { lat = cLat; lon = cLon; return true; }
+            foreach (string service in GeoServices)
+            {
+                string body = Fetch(service);
+                double la, lo;
+                if (!ParseGeo(body, out la, out lo)) continue;
+                string country = TryString(body, "country_code");
+                if (country != null) Localization.SetCountry(country);
+                try { File.WriteAllText(LocationPath, la.ToString("R", CultureInfo.InvariantCulture) + " " + lo.ToString("R", CultureInfo.InvariantCulture) + " " + (country ?? "-") + " " + DateTimeOffset.UtcNow.ToUnixTimeSeconds().ToString(CultureInfo.InvariantCulture)); }
+                catch { /* ignore */ }
+                lat = la; lon = lo;
+                return true;
+            }
+            lat = cLat; lon = cLon;
+            return have;   // offline: the last known place is better than none
+        }
+
+        static bool ReadLocation(out double lat, out double lon, out string country, out DateTime stamp)
+        {
+            lat = lon = 0; country = null; stamp = DateTime.MinValue;
+            try
+            {
+                if (!File.Exists(LocationPath)) return false;
+                string[] p = File.ReadAllText(LocationPath).Trim().Split(' ');
+                long unix;
+                if (p.Length < 4
+                    || !double.TryParse(p[0], NumberStyles.Float, CultureInfo.InvariantCulture, out lat)
+                    || !double.TryParse(p[1], NumberStyles.Float, CultureInfo.InvariantCulture, out lon)
+                    || !long.TryParse(p[3], NumberStyles.Integer, CultureInfo.InvariantCulture, out unix)) return false;
+                country = p[2] == "-" ? null : p[2];
+                stamp = DateTimeOffset.FromUnixTimeSeconds(unix).UtcDateTime;
+                return true;
+            }
+            catch { return false; }
+        }
+
+        internal static bool ParseGeo(string json, out double lat, out double lon)
+        {
+            lat = lon = 0;
+            if (string.IsNullOrEmpty(json) || json.IndexOf("\"success\":false", StringComparison.Ordinal) >= 0 || json.IndexOf("\"error\":true", StringComparison.Ordinal) >= 0) return false;
+            if (!TryNumber(json, "latitude", out lat) || !TryNumber(json, "longitude", out lon)) return false;
+            return lat >= -90 && lat <= 90 && lon >= -180 && lon <= 180 && !(lat == 0 && lon == 0);
+        }
+
+        internal static string TryString(string json, string key)
+        {
+            if (json == null) return null;
+            int i = json.IndexOf("\"" + key + "\"", StringComparison.Ordinal);
+            if (i < 0) return null;
+            i = json.IndexOf(':', i);
+            if (i < 0) return null;
+            int a = json.IndexOf('"', i + 1);
+            if (a < 0) return null;
+            int b = json.IndexOf('"', a + 1);
+            return b > a ? json.Substring(a + 1, b - a - 1) : null;
+        }
+
+        static string Fetch(string url) { return FetchCurl(url) ?? FetchHttp(url); }
+
+        static string FetchCurl(string url)
         {
             try
             {
                 var start = new ProcessStartInfo("/usr/bin/curl")
                 {
-                    Arguments = "-sS -m 6 -- " + Url,
+                    Arguments = "-sS -m 6 -- " + url,
                     RedirectStandardOutput = true,
                     RedirectStandardError = true,
                     UseShellExecute = false
@@ -68,14 +175,14 @@ namespace Launcher.Core
             catch (Exception ex) { LastError = ex.Message; return null; }
         }
 
-        static string FetchHttp()
+        static string FetchHttp(string url)
         {
             try
             {
                 using (var http = new HttpClient())
                 {
                     http.Timeout = TimeSpan.FromSeconds(6);
-                    return http.GetStringAsync(Url).GetAwaiter().GetResult();
+                    return http.GetStringAsync(url).GetAwaiter().GetResult();
                 }
             }
             catch (Exception ex) { LastError = ex.Message; return null; }
@@ -93,7 +200,7 @@ namespace Launcher.Core
             Icon = IconFor(code);
             double lo, hi;
             if (TryNumber(json, "temperature_2m_min", out lo) && TryNumber(json, "temperature_2m_max", out hi))
-                Span = "M\u00edn: " + ((int)Math.Round(lo)).ToString(CultureInfo.InvariantCulture) + "\u00b0   M\u00e1x: " + ((int)Math.Round(hi)).ToString(CultureInfo.InvariantCulture) + "\u00b0";
+                Span = Localization.RangeText((int)Math.Round(lo), (int)Math.Round(hi));
             else Span = null;
             UpdatedUtc = DateTime.UtcNow;
             LastError = null;

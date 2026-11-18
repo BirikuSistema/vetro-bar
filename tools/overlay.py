@@ -10,6 +10,7 @@ native/dock/.vetro-bar-stock/ and later applies leave that copy alone.
 import base64
 import io
 import json
+import os
 import sys
 import tarfile
 import urllib.error
@@ -17,7 +18,9 @@ import urllib.request
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-TV = __import__("os").environ.get("TV_IP", "192.168.4.32")
+TV = os.environ.get("TV_IP", "").strip()
+if not TV:
+    sys.exit("Set TV_IP to your TV's IP address first, e.g.  export TV_IP=192.168.1.50")
 AGENT = "http://%s:8099" % TV
 DOCK_MARKERS = ("/.vetro-bar-stock/", "/.buildResult/")
 
@@ -37,9 +40,9 @@ def post(path, payload, timeout=40):
         with urllib.request.urlopen(req, timeout=timeout) as response:
             body = json.loads(response.read().decode())
     except urllib.error.URLError as error:
-        raise SystemExit("no llego al agente de Vetro en %s (%s)" % (AGENT, error))
+        raise SystemExit("cannot reach Vetro's agent at %s (%s)" % (AGENT, error))
     if path == "/exec" and (not body.get("ok") or body.get("exit_code")):
-        raise SystemExit(body.get("stderr") or body.get("output") or "el comando en la tele fallo")
+        raise SystemExit(body.get("stderr") or body.get("output") or "the command on the TV failed")
     return body
 
 
@@ -67,7 +70,7 @@ done
 """)
     dock = out.strip().splitlines()[-1].strip() if out.strip() else ""
     if not dock or any(mark in dock + "/" for mark in DOCK_MARKERS):
-        raise SystemExit("no encuentro el dock en marcha. ¿Vetro esta arrancado?")
+        raise SystemExit("cannot find the running dock. Is Vetro started?")
     return dock
 
 
@@ -132,12 +135,12 @@ def apply():
     ensure_backup(dock)
     upload(dock)
     refresh()
-    print("overlay aplicado")
+    print("overlay applied")
 
 
 def restore():
     dock = dock_dir()
-    print("restaurando " + dock)
+    print("restoring " + dock)
     out = sh(r"""
 set -e
 d='%s'

@@ -92,6 +92,7 @@ namespace Launcher.Tests
 
             T.Run("weather: Open-Meteo JSON becomes a temperature and an icon", () =>
             {
+                Localization.Configure("es_ES.utf8", "ES", null);
                 T.True(Weather.Apply("{\"current\":{\"temperature_2m\":12.6,\"weather_code\":0}}"), "clear sky");
                 T.Eq(Weather.Text, "13\u00b0", "rounded degrees");
                 T.Eq(Weather.Icon, "sun", "code 0 is sun");
@@ -104,9 +105,64 @@ namespace Launcher.Tests
                 T.Eq(Weather.Text, "16\u00b0", "numeric current value wins");
                 T.Eq(Weather.Icon, "cloud-sun", "code 2 is cloud-sun");
                 T.True(Weather.Apply("{\"current\":{\"temperature_2m\":15.7,\"weather_code\":2},\"daily\":{\"temperature_2m_min\":[8.2],\"temperature_2m_max\":[18.6]}}"), "daily range");
-                T.Eq(Weather.Span, "M\u00edn: 8\u00b0   M\u00e1x: 19\u00b0", "low then high");
+                T.Eq(Weather.Span, "M\u00edn: 8\u00b0   M\u00e1x: 19\u00b0", "low then high, in the TV's language");
+                Localization.Configure("en_GB.utf8", "GB", null);
+                Weather.Apply("{\"current\":{\"temperature_2m\":15.7,\"weather_code\":2},\"daily\":{\"temperature_2m_min\":[8.2],\"temperature_2m_max\":[18.6]}}");
+                T.Eq(Weather.Span, "Low: 8\u00b0   High: 19\u00b0", "English labels");
                 T.True(!Weather.Apply(""), "empty json is ignored");
                 T.True(!Weather.Apply("{\"foo\":1}"), "missing temperature is ignored");
+            });
+
+            T.Run("localization: language, date line, clock format and units follow the TV, not the author", () =>
+            {
+                T.Eq(Localization.LanguageOf("es_ES.utf8"), "es", "glibc style locale");
+                T.Eq(Localization.LanguageOf("pt-BR"), "pt", "BCP-47 style locale");
+                T.Eq(Localization.LanguageOf("C"), null, "C locale carries no language");
+                T.Eq(Localization.LanguageOf("../x"), null, "junk refused");
+                var wed = new DateTime(2026, 11, 18, 18, 5, 0);
+                Localization.Configure("es_ES.utf8", "ES", null);
+                T.Eq(Localization.DayText(wed), "Mi\u00e9rcoles 18 de noviembre", "Spanish");
+                T.Eq(Localization.ClockText(wed), "18:05", "Spain uses 24 h");
+                T.True(!Localization.Fahrenheit, "Spain uses Celsius");
+                Localization.Configure("en_US.utf8", "US", null);
+                T.Eq(Localization.DayText(wed), "Wednesday, November 18", "US English puts the month first");
+                T.Eq(Localization.ClockText(wed), "6:05 PM", "US uses 12 h");
+                T.True(Localization.Fahrenheit, "US uses Fahrenheit");
+                Localization.Configure("en_GB.utf8", "GB", null);
+                T.Eq(Localization.DayText(wed), "Wednesday 18 November", "British English puts the day first");
+                T.Eq(Localization.DayText(new DateTime(2026, 3, 29)), "Sunday 29 March", "first day of the week");
+                Localization.Configure("de_DE.utf8", "DE", null);
+                T.Eq(Localization.DayText(wed), "Mittwoch, 18. November", "German");
+                Localization.Configure("ja_JP.utf8", "JP", null);
+                T.Eq(Localization.Language, "en", "unsupported languages fall back to English");
+                Localization.Configure("es_ES.utf8", "ES", Settings.Parse("clock=12\nunits=f\nlanguage=fr # comment\nlocation=48.85, 2.35\nbogus=1\n"));
+                T.Eq(Localization.Language, "fr", "the user's language wins over the TV");
+                T.Eq(Localization.ClockText(wed), "6:05 PM", "the user's clock wins over the country");
+                T.True(Localization.Fahrenheit, "the user's units win over the country");
+                Settings s = Settings.Parse("location=48.85, 2.35");
+                T.True(s.HasLocation && s.Latitude == 48.85 && s.Longitude == 2.35, "location parsed");
+                T.True(!Settings.Parse("location=99,500").HasLocation, "out of range location refused");
+                T.True(!Settings.Parse("clock=13").Clock.Equals(13), "bad clock ignored");
+                T.Eq(Settings.Parse(null).Language, null, "no file means no overrides");
+                var cli = new Settings(); cli.Set("clock", "24");
+                cli.Fill(Settings.Parse("clock=12\nunits=f"));
+                T.Eq(cli.Clock, 24, "higher priority source is kept");
+                T.Eq(cli.Units, 'f', "lower priority source fills the gap");
+                Localization.Configure("es_ES.utf8", "ES", null);
+            });
+
+            T.Run("weather location: IP lookups are parsed, bad answers refused, URL carries place and unit", () =>
+            {
+                double la, lo;
+                T.True(Weather.ParseGeo("{\"ip\":\"1.2.3.4\",\"success\":true,\"country_code\":\"ES\",\"latitude\":41.6554123,\"longitude\":-4.7235304}", out la, out lo), "ipwho.is answer");
+                T.True(Math.Abs(la - 41.6554123) < 1e-9 && Math.Abs(lo + 4.7235304) < 1e-9, "coordinates");
+                T.Eq(Weather.TryString("{\"country_code\": \"ES\"}", "country_code"), "ES", "country code");
+                T.True(!Weather.ParseGeo("{\"success\":false,\"message\":\"rate limited\"}", out la, out lo), "failure answer refused");
+                T.True(!Weather.ParseGeo("{\"error\":true,\"reason\":\"RateLimited\"}", out la, out lo), "error answer refused");
+                T.True(!Weather.ParseGeo("<html>", out la, out lo), "not json refused");
+                string url = Weather.BuildUrl(41.6554, -4.7235, false);
+                T.True(url.Contains("latitude=41.655&longitude=-4.724") && url.Contains("timezone=auto") && !url.Contains("fahrenheit"), "metric url, time zone found from the place");
+                T.True(Weather.BuildUrl(40.7, -74, true).Contains("temperature_unit=fahrenheit"), "fahrenheit url");
             });
 
             T.Run("layout: overlay TV pin, stacked icon pins, full-width chrome", () =>
