@@ -26,8 +26,8 @@ namespace Launcher.Ui
         private IntPtr _shadow, _pill, _clip, _appsClip, _highlight, _highlight2, _ring, _ring2, _clock, _divider, _dividerLeft;
         private IntPtr _sideClock, _day, _weatherText, _weatherSpan, _weatherIcon;
         private IntPtr _clockPill, _weatherPill;
-        private int _sideClockW, _sideClockX = int.MinValue, _sideClockY = int.MinValue, _sideClockAlpha = -1;
-        private int _weatherW, _weatherX = int.MinValue, _weatherY = int.MinValue, _weatherAlpha = -1;
+        private int _sideClockW, _sideClockX = int.MinValue, _sideClockY = int.MinValue, _sideClockAlpha = -1, _dayAlpha = -1;
+        private int _weatherW, _weatherX = int.MinValue, _weatherY = int.MinValue, _weatherAlpha = -1, _weatherSpanAlpha = -1;
         private string _weatherShown, _spanShown, _iconShown, _dayShown;
         private int _dayW, _dayX = int.MinValue, _dayY = int.MinValue, _spanW, _tempAscent;
         private Box _clockPillBox, _weatherPillBox;
@@ -244,6 +244,25 @@ namespace Launcher.Ui
             _dayY = int.MinValue;
         }
 
+        public void InvalidateChrome()
+        {
+            _weatherShown = null;
+            _spanShown = null;
+            _iconShown = null;
+            _sideClockX = int.MinValue;
+            _sideClockY = int.MinValue;
+            _dayX = int.MinValue;
+            _dayY = int.MinValue;
+            _weatherX = int.MinValue;
+            _weatherY = int.MinValue;
+            _sideClockAlpha = -1;
+            _dayAlpha = -1;
+            _weatherAlpha = -1;
+            _weatherSpanAlpha = -1;
+            _clockPillBox.W = -1;
+            _weatherPillBox.W = -1;
+        }
+
         /// <summary>Widest the words inside a side pill may be: the gap, minus air at the screen and at the bar, minus the pill's own padding.</summary>
         int SideInner()
         {
@@ -254,19 +273,45 @@ namespace Launcher.Ui
             return inner > 48 ? inner : 48;
         }
 
-        /// <summary>Sets the line and shrinks it from <paramref name="maxSize"/> until it fits.</summary>
+        /// <summary>Sets the line, shrinks down to 20 px, and truncates any long city prefix before " · " if needed.</summary>
         int FitLine(IntPtr text, string value, int room, int maxSize)
         {
             int size = maxSize;
+            int minSize = Math.Min(maxSize, 20);
             Efl.evas_object_text_font_set(text, ChromeFont, size);
             Efl.evas_object_text_text_set(text, value ?? "");
             if (string.IsNullOrEmpty(value) || room < 1) return 0;
             int w = Efl.evas_object_text_horiz_advance_get(text);
-            while (w > room && size > 18)
+            while (w > room && size > minSize)
             {
                 size--;
                 Efl.evas_object_text_font_set(text, ChromeFont, size);
                 w = Efl.evas_object_text_horiz_advance_get(text);
+            }
+            if (w > room)
+            {
+                const string sep = "  \u00b7  ";
+                int sepIdx = value.IndexOf(sep, StringComparison.Ordinal);
+                if (sepIdx > 1)
+                {
+                    string prefix = value.Substring(0, sepIdx);
+                    string suffix = value.Substring(sepIdx);
+                    for (int len = prefix.Length - 1; len >= 1 && w > room; len--)
+                    {
+                        string cand = prefix.Substring(0, len).TrimEnd() + "\u2026" + suffix;
+                        Efl.evas_object_text_text_set(text, cand);
+                        w = Efl.evas_object_text_horiz_advance_get(text);
+                    }
+                }
+                else
+                {
+                    for (int len = value.Length - 1; len >= 1 && w > room; len--)
+                    {
+                        string cand = value.Substring(0, len).TrimEnd() + "\u2026";
+                        Efl.evas_object_text_text_set(text, cand);
+                        w = Efl.evas_object_text_horiz_advance_get(text);
+                    }
+                }
             }
             return w;
         }
@@ -323,13 +368,19 @@ namespace Launcher.Ui
             if (dayAscent <= 0) dayAscent = Design.SideSubSize * 952 / 1024;
             int topPad = clockAscent - clockAscent * 724 / 952;
             int visualBottom = size + lineGap + dayAscent + dayAscent * 276 / 952;
-            int y = pillY + (pillH - (visualBottom - topPad)) / 2 - topPad;
-            int subY = y + size + lineGap;
+            int twoLineY = pillY + (pillH - (visualBottom - topPad)) / 2 - topPad;
+            int singleClockY = pillY + (pillH - (clockAscent - topPad)) / 2 - topPad;
+            int subY = twoLineY + size + lineGap;
 
-            string w = Weather.Text;
+            bool showClock = Localization.ShowClock;
+            bool showDate = showClock && Localization.ShowDate && !string.IsNullOrEmpty(_dayShown);
+            int clockY = showDate ? twoLineY : singleClockY;
+
+            string w = Weather.Enabled ? Weather.Text : null;
             string icon = Weather.Icon;
-            string span = Weather.Span;
-            bool have = !string.IsNullOrEmpty(w);
+            string span = Weather.Enabled ? Weather.SubText : null;
+            bool have = Weather.Enabled && !string.IsNullOrEmpty(w);
+            bool haveSub = have && !string.IsNullOrEmpty(span);
             if (w != _weatherShown || span != _spanShown || icon != _iconShown)
             {
                 _weatherShown = w;
@@ -337,7 +388,8 @@ namespace Launcher.Ui
                 _iconShown = icon;
                 _weatherW = have ? FitLine(_weatherText, w, SideInner() - size - 12, size) : 0;
                 _tempAscent = Efl.evas_object_text_ascent_get(_weatherText);
-                _spanW = FitLine(_weatherSpan, span, SideInner(), Design.SideSubSize);
+                _spanW = haveSub ? FitLine(_weatherSpan, span, SideInner(), Design.SideSubSize) : 0;
+                if (!haveSub) Efl.evas_object_text_text_set(_weatherSpan, "");
                 string path = Path.Combine(_assets, "weather", (icon ?? "cloud") + ".png");
                 if (File.Exists(path)) Efl.evas_object_image_file_set(_weatherIcon, path, null);
                 _weatherX = int.MinValue;
@@ -345,15 +397,18 @@ namespace Launcher.Ui
 
             int iconGap = 12;
             int group = have ? size + iconGap + _weatherW : 0;
-            int pillW = Math.Max(Math.Max(_sideClockW, _dayW), Math.Max(group, _spanW)) + 2 * DockLayout.PadX;
-            int clockX = _layout.ClockMid - pillW / 2 + side;
-            Place(_clockPill, ref _clockPillBox, SidePillBox(clockX, pillY, pillW, pillH));
-            int cx = clockX + (pillW - _sideClockW) / 2;
-            int dx = clockX + (pillW - _dayW) / 2;
-            if (cx != _sideClockX || y != _sideClockY)
+            int fixedPillW = SideInner() + 2 * DockLayout.PadX;
+            int clockPillW = fixedPillW;
+            int weatherPillW = fixedPillW;
+
+            int clockX = _layout.ClockMid - clockPillW / 2 + side;
+            Place(_clockPill, ref _clockPillBox, SidePillBox(clockX, pillY, clockPillW, pillH));
+            int cx = clockX + (clockPillW - _sideClockW) / 2;
+            int dx = clockX + (clockPillW - _dayW) / 2;
+            if (cx != _sideClockX || clockY != _sideClockY)
             {
-                _sideClockX = cx; _sideClockY = y;
-                Efl.evas_object_move(_sideClock, cx, y);
+                _sideClockX = cx; _sideClockY = clockY;
+                Efl.evas_object_move(_sideClock, cx, clockY);
             }
             if (dx != _dayX || subY != _dayY)
             {
@@ -361,28 +416,37 @@ namespace Launcher.Ui
                 _dayY = subY;
                 Efl.evas_object_move(_day, dx, subY);
             }
-            if (presence != _sideClockAlpha)
+            int clockA = showClock ? presence : 0;
+            int dayA = showDate ? presence * 8 / 10 : 0;
+            if (clockA != _sideClockAlpha)
             {
-                _sideClockAlpha = presence;
-                Tint(_clockPill, presence);
-                Tint(_sideClock, presence);
-                Tint(_day, presence * 8 / 10);
+                _sideClockAlpha = clockA;
+                Tint(_clockPill, clockA);
+                Tint(_sideClock, clockA);
+            }
+            if (dayA != _dayAlpha)
+            {
+                _dayAlpha = dayA;
+                Tint(_day, dayA);
             }
 
             int a = have ? presence : 0;
-            int pillX = _layout.WeatherMid - pillW / 2 - side;
-            Place(_weatherPill, ref _weatherPillBox, SidePillBox(pillX, pillY, pillW, pillH));
-            int wx = pillX + (pillW - group) / 2;
-            // The digits sit on the baseline, under the accent space. Samsung One's cap is about 0.71 of the em.
+            int spanA = haveSub ? presence * 8 / 10 : 0;
+            int pillX = _layout.WeatherMid - weatherPillW / 2 - side;
+            Place(_weatherPill, ref _weatherPillBox, SidePillBox(pillX, pillY, weatherPillW, pillH));
+            int wx = pillX + (weatherPillW - group) / 2;
             int ascent = _tempAscent > 0 ? _tempAscent : size * 74 / 80;
-            int iconY = y + (ascent - size * 36 / 100) - size / 2;
-            if (wx != _weatherX || y != _weatherY)
+            int tTop = ascent - ascent * 724 / 952;
+            int singleWeatherY = pillY + (pillH - (ascent - tTop)) / 2 - tTop;
+            int weatherY = haveSub ? twoLineY : singleWeatherY;
+            int iconY = weatherY + (ascent - size * 36 / 100) - size / 2;
+            if (wx != _weatherX || weatherY != _weatherY)
             {
-                _weatherX = wx; _weatherY = y;
+                _weatherX = wx; _weatherY = weatherY;
                 Efl.evas_object_move(_weatherIcon, wx, iconY);
                 Efl.evas_object_resize(_weatherIcon, size, size);
-                Efl.evas_object_move(_weatherText, wx + size + iconGap, y);
-                Efl.evas_object_move(_weatherSpan, pillX + (pillW - _spanW) / 2, subY);
+                Efl.evas_object_move(_weatherText, wx + size + iconGap, weatherY);
+                Efl.evas_object_move(_weatherSpan, pillX + (weatherPillW - _spanW) / 2, subY);
             }
             if (a != _weatherAlpha)
             {
@@ -390,7 +454,11 @@ namespace Launcher.Ui
                 Tint(_weatherPill, a);
                 Tint(_weatherIcon, a);
                 Tint(_weatherText, a);
-                Tint(_weatherSpan, a * 8 / 10);
+            }
+            if (spanA != _weatherSpanAlpha)
+            {
+                _weatherSpanAlpha = spanA;
+                Tint(_weatherSpan, spanA);
             }
         }
 

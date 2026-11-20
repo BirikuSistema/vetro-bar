@@ -3,6 +3,8 @@ using System.Diagnostics;
 using System.Globalization;
 using System.IO;
 using System.Runtime.InteropServices;
+using System.Threading;
+using System.Threading.Tasks;
 using Launcher.Core;
 using Launcher.Host;
 using Launcher.Native;
@@ -18,6 +20,7 @@ namespace Launcher
         private const int WindowLayer = 900;
         private const int DefaultScreenW = 1920, DefaultScreenH = 1080;
         private const double HomeEchoSeconds = 1.5;
+        private const double SettingsIdleSeconds = 60.0;
 
         // Delegates handed to native code live in static fields so the GC can never collect them.
         private static readonly Efl.EvasCb KeyCb = OnKey;
@@ -30,6 +33,7 @@ namespace Launcher
         private static readonly Efl.TaskCb FpsCb = OnFps;
         private static readonly Efl.TaskCb PremapCb = OnPremap;
         private static readonly Efl.TaskCb ReactivateCb = OnReactivate;
+        private static readonly Efl.TaskCb PollAsyncCb = OnPollAsync;
 
         private static readonly CommandBuffer Commands = new CommandBuffer();
         private static readonly NavigationInput Navigation = new NavigationInput();
@@ -37,8 +41,8 @@ namespace Launcher
         private static readonly byte[] ReadBuf = new byte[128];
 
         private static InputWatcher _input;
-        private static string _dir, _pidPath, _fifoPath;
-        private static IntPtr _win, _anim, _idle, _fifoHandler, _clockTimer, _weatherTimer, _premapTimer, _reactivateTimer;
+        private static string _dir, _pidPath, _fifoPath, _confPath;
+        private static IntPtr _win, _anim, _idle, _fifoHandler, _clockTimer, _weatherTimer, _weatherSoonTimer, _premapTimer, _reactivateTimer, _pollTimer;
         private static int _reactivateLeft;
         private static int _fifoFd = -1;
         private static double _lastFrame;
@@ -47,6 +51,15 @@ namespace Launcher
         private static Dock _dock, _appsDock, _inputsDock;
         private static AppEntry _pendingLaunch;
         private static AppEntry _homeLaunch;
+        private static AppEntry _tvSettingsEntry, _tvStoreEntry, _samsungAppsEntry, _vetroEntry;
+        private static Settings _cliEnvSettings, _fileSettings, _effectiveSettings;
+        private static string _tvLanguage, _tvCountry;
+        private static SettingsController _settingsCtl;
+        private static SettingsModal _settingsModal;
+        private static GeoSearchOutcome _pendingCityOutcome;
+        private static int _citySearchGen;
+        private static int _pendingCityGen;
+        private static Task _weatherTask;
 
         // --perf: frame-time probe (off by default)
         private static bool _perf;
@@ -167,7 +180,61 @@ namespace Launcher
             _fifoHandler = Efl.ecore_main_fd_handler_add(_fifoFd, Efl.EcoreFdRead, FifoCb, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero);
         }
 
-        private static AppEntry[] LoadApps(string path) { return Catalog.ArrangeBar(LoadList(path, Catalog.BuiltIn)); }
+        private static AppEntry[] LoadApps(string path, out AppEntry[] raw)
+        {
+            raw = LoadList(path, Catalog.BuiltIn);
+            return Catalog.ArrangeBar(raw);
+        }
+
+        private static string FindInstalledApp(params string[] candidates)
+        {
+            foreach (string id in candidates)
+            {
+                if (string.IsNullOrEmpty(id)) continue;
+                if (Directory.Exists("/usr/apps/" + id) || Directory.Exists("/opt/usr/apps/" + id))
+                    return id;
+                int dot = id.IndexOf('.');
+                if (dot > 0 && id.IndexOf('.', dot + 1) < 0)
+                {
+                    string pkg = id.Substring(0, dot);
+                    if (Directory.Exists("/usr/apps/" + pkg) || Directory.Exists("/opt/usr/apps/" + pkg))
+                        return id;
+                }
+            }
+            return null;
+        }
+
+        private static void ConfigureShortcuts(AppEntry[] rawApps)
+        {
+            AppEntry origSettings = null;
+            if (rawApps != null)
+            {
+                foreach (AppEntry e in rawApps)
+                    if (e != null && e.Slug == "settings") { origSettings = e; break; }
+            }
+            if (origSettings != null)
+            {
+                _tvSettingsEntry = new AppEntry(
+                    "tvsettings", origSettings.Label, origSettings.AppId, origSettings.FallbackAppId,
+                    origSettings.Key, origSettings.SourceType, origSettings.Panel,
+                    origSettings.SystemApp, origSettings.IconPath, origSettings.KillFirst);
+            }
+            else
+            {
+                _tvSettingsEntry = new AppEntry("tvsettings", "TV Settings", "org.tizen.menu", "com.samsung.tv.setting", "XF86SysMenu");
+            }
+
+            string storeId = FindInstalledApp(
+                _effectiveSettings != null ? _effectiveSettings.TvStoreApp : null,
+                "A2STVStore.Store", "com.samsung.tv.store", "org.tizen.samsung-apps", "com.samsung.tv.apps", "com.samsung.tv.webappstore");
+            _tvStoreEntry = new AppEntry("tvstore", "TV-Store", storeId ?? "A2STVStore.Store", "com.samsung.tv.store");
+
+            string appsId = FindInstalledApp("com.samsung.tv.store", "com.samsung.tv.coba.apps", "org.volt.apps", "org.tizen.samsung-apps");
+            _samsungAppsEntry = new AppEntry("samsungapps", "Apps", appsId ?? "com.samsung.tv.store", "com.samsung.tv.coba.apps");
+
+            string vetroId = FindInstalledApp("vetrotvapp.app");
+            _vetroEntry = new AppEntry("vetro", "Vetro", vetroId ?? "vetrotvapp.app", null);
+        }
 
         private static AppEntry[] LoadList(string path, Func<AppEntry[]> builtIn)
         {
@@ -194,6 +261,7 @@ namespace Launcher
             _pendingLaunch = null;
             LauncherSvc.CancelPendingKey();
             if (_ctl != _appsCtl && !_ctl.IsActive) ActivatePage(_appsCtl, _appsDock);
+            if (!_ctl.IsActive) _ctl.SetFocus(0);
             if (!_ctl.Show()) { ResetIdle(); return; }
 
             SoundPlayer.Play(SoundEffect.Open);
@@ -217,7 +285,13 @@ namespace Launcher
         {
             try
             {
-                if (_ctl != null && _ctl.IsActive && _reactivateLeft > 0)
+                if (_settingsCtl != null && _settingsCtl.IsActive && _reactivateLeft > 0)
+                {
+                    _reactivateLeft--;
+                    Efl.elm_win_activate(_settingsModal.Win);
+                    if (_reactivateLeft > 0) return 1;
+                }
+                else if (_ctl != null && _ctl.IsActive && _reactivateLeft > 0)
                 {
                     _reactivateLeft--;
                     Efl.elm_win_activate(_win);
@@ -232,12 +306,55 @@ namespace Launcher
         private static void HideDock(bool playSound = true)
         {
             _pendingLaunch = null;
+            _reactivateLeft = 0;
+            if (_reactivateTimer != IntPtr.Zero)
+            {
+                Efl.ecore_timer_del(_reactivateTimer);
+                _reactivateTimer = IntPtr.Zero;
+            }
             CancelIdle();
             StopClock();
+            if (_settingsCtl != null && (_settingsCtl.IsActive || _settingsCtl.Phase == Phase.Showing))
+            {
+                _settingsCtl.Hide();
+                StartAnimator();
+            }
             if (_ctl.Hide())
             {
                 if (playSound) SoundPlayer.Play(SoundEffect.Close);
                 StartAnimator();
+            }
+        }
+
+        private static void OpenSettings()
+        {
+            if (_settingsCtl == null || _settingsModal == null) return;
+            int sourceType = -1;
+            Efl.vconf_get_int("memory/system/source_type", out sourceType);
+            _settingsCtl.ActiveSourceType = sourceType;
+
+            if (_settingsCtl.Show())
+            {
+                SoundPlayer.Play(SoundEffect.Open);
+                _settingsModal.ShowWindow();
+                _settingsModal.Apply(_settingsCtl, _inputs);
+                StartAnimator();
+                ResetIdle(SettingsIdleSeconds);
+            }
+        }
+
+        private static void CloseSettings(bool playSound = true)
+        {
+            if (_settingsCtl == null || !_settingsCtl.IsActive) return;
+            if (_settingsCtl.Hide())
+            {
+                if (playSound) SoundPlayer.Play(SoundEffect.Close);
+                StartAnimator();
+            }
+            if (_ctl != null && _ctl.Phase == Phase.Shown)
+            {
+                Efl.elm_win_activate(_win);
+                ResetIdle(Controller.IdleHideSeconds);
             }
         }
 
@@ -282,28 +399,39 @@ namespace Launcher
         /// <summary>Language, region and clock format: command line, then environment, then vetro-bar.conf, then the TV's own settings.</summary>
         private static void SetupLocalization(string[] args)
         {
-            var user = new Settings();
-            string[] keys = { "language", "location", "clock", "units" };
-            string[] flags = { "--lang", "--location", "--clock", "--units" };
-            string[] envs = { "TVLAUNCHER_LANG", "TVLAUNCHER_LOCATION", "TVLAUNCHER_CLOCK", "TVLAUNCHER_UNITS" };
+            _cliEnvSettings = new Settings();
+            string[] keys = { "language", "location", "clock", "units", "sound" };
+            string[] flags = { "--lang", "--location", "--clock", "--units", "--sound" };
+            string[] envs = { "TVLAUNCHER_LANG", "TVLAUNCHER_LOCATION", "TVLAUNCHER_CLOCK", "TVLAUNCHER_UNITS", "TVLAUNCHER_SOUND" };
             for (int i = 0; i < keys.Length; i++)
             {
                 string v = Arg(args, flags[i]) ?? Environment.GetEnvironmentVariable(envs[i]);
-                if (v != null && !user.Set(keys[i], v)) Logger.Write("settings: ignored " + keys[i] + "=" + v);
+                if (v != null && !_cliEnvSettings.Set(keys[i], v)) Logger.Write("settings: ignored " + keys[i] + "=" + v);
             }
+
+            _confPath = Path.Combine(Weather.CacheDir, "vetro-bar.conf");
+            _fileSettings = new Settings();
             try
             {
-                string conf = Path.Combine(Weather.CacheDir, "vetro-bar.conf");
-                if (File.Exists(conf)) user.Fill(Settings.Parse(File.ReadAllText(conf)));
+                if (File.Exists(_confPath)) _fileSettings = Settings.Parse(File.ReadAllText(_confPath));
             }
             catch (Exception ex) { Logger.Write("settings: " + ex.Message); }
 
-            string tvLanguage = TvString("db/menu_widget/language") ?? Environment.GetEnvironmentVariable("LANG");
-            Localization.Configure(tvLanguage, TvString("db/comss/countrycode"), user);
-            if (user.HasLocation) Weather.UseLocation(user.Latitude, user.Longitude);
+            _tvLanguage = TvString("db/menu_widget/language") ?? Environment.GetEnvironmentVariable("LANG");
+            _tvCountry = TvString("db/comss/countrycode");
+            ApplyEffectiveSettings();
             Logger.Write("locale: language=" + Localization.Language + " country=" + (Localization.Country ?? "?")
                 + " clock=" + (Localization.Is12Hour ? "12h" : "24h") + " units=" + (Localization.Fahrenheit ? "F" : "C")
-                + " weather=" + (user.HasLocation ? "fixed location" : "from IP address"));
+                + " weather=" + (_effectiveSettings.EffectiveShowWeather ? _effectiveSettings.EffectiveWeatherMode : "off"));
+        }
+
+        private static void ApplyEffectiveSettings()
+        {
+            _effectiveSettings = _cliEnvSettings.Clone();
+            _effectiveSettings.Fill(_fileSettings);
+            Localization.Configure(_tvLanguage, _tvCountry, _effectiveSettings);
+            Weather.Configure(_effectiveSettings);
+            Weather.RebuildLabels();
         }
 
         private static string TvString(string key)
@@ -331,7 +459,8 @@ namespace Launcher
             _clockTimer = Efl.ecore_timer_add(wait, ClockCb, IntPtr.Zero);
             if (Design.SideChrome)
             {
-                Efl.ecore_timer_add(2.0, WeatherSoonCb, IntPtr.Zero);
+                if (_weatherSoonTimer != IntPtr.Zero) Efl.ecore_timer_del(_weatherSoonTimer);
+                _weatherSoonTimer = Efl.ecore_timer_add(2.0, WeatherSoonCb, IntPtr.Zero);
                 if (_weatherTimer == IntPtr.Zero)
                     _weatherTimer = Efl.ecore_timer_add(Design.WeatherSeconds, WeatherCb, IntPtr.Zero);
             }
@@ -339,13 +468,21 @@ namespace Launcher
 
         private static void StopClock()
         {
-            if (_clockTimer == IntPtr.Zero) return;
-            Efl.ecore_timer_del(_clockTimer);
-            _clockTimer = IntPtr.Zero;
+            if (_clockTimer != IntPtr.Zero)
+            {
+                Efl.ecore_timer_del(_clockTimer);
+                _clockTimer = IntPtr.Zero;
+            }
+            if (_weatherSoonTimer != IntPtr.Zero)
+            {
+                Efl.ecore_timer_del(_weatherSoonTimer);
+                _weatherSoonTimer = IntPtr.Zero;
+            }
         }
 
         private static byte OnWeatherSoon(IntPtr data)
         {
+            _weatherSoonTimer = IntPtr.Zero;
             try { if (_ctl != null && _ctl.IsActive && _dock != null) _dock.Apply(_ctl); }
             catch (Exception ex) { Logger.Write("weather: " + ex.Message); }
             return 0;
@@ -379,8 +516,13 @@ namespace Launcher
 
         private static void ResetIdle()
         {
-            if (_idle == IntPtr.Zero) _idle = Efl.ecore_timer_add(Controller.IdleHideSeconds, IdleCb, IntPtr.Zero);
-            else Efl.ecore_timer_reset(_idle);
+            ResetIdle(_settingsCtl != null && _settingsCtl.IsActive ? SettingsIdleSeconds : Controller.IdleHideSeconds);
+        }
+
+        private static void ResetIdle(double seconds)
+        {
+            if (_idle != IntPtr.Zero) Efl.ecore_timer_del(_idle);
+            _idle = Efl.ecore_timer_add(seconds, IdleCb, IntPtr.Zero);
         }
 
         private static void CancelIdle()
@@ -400,8 +542,11 @@ namespace Launcher
                 double now = Efl.ecore_time_get();
                 double dt = now - _lastFrame;
                 bool more = _ctl.Tick(dt);
+                bool moreSet = _settingsCtl != null && _settingsCtl.Tick(dt);
                 _lastFrame = now;
                 _dock.Apply(_ctl);
+                if (_settingsCtl != null && _settingsModal != null)
+                    _settingsModal.Apply(_settingsCtl, _inputs);
                 if (_ctl.Phase == Phase.Hidden)
                 {
                     Efl.evas_object_hide(_win);
@@ -409,8 +554,8 @@ namespace Launcher
                     _pendingLaunch = null;
                     if (pending != null) LauncherSvc.Execute(pending);
                 }
-                if (_perf) PerfSample(dt, (Stopwatch.GetTimestamp() - t0) * 1000.0 / Stopwatch.Frequency, !more);
-                if (more) return 1;
+                if (_perf) PerfSample(dt, (Stopwatch.GetTimestamp() - t0) * 1000.0 / Stopwatch.Frequency, !(more || moreSet));
+                if (more || moreSet) return 1;
             }
             catch (Exception ex) { Logger.Write("frame: " + ex); }
             _anim = IntPtr.Zero;
@@ -470,7 +615,11 @@ namespace Launcher
         private static byte OnIdle(IntPtr data)
         {
             _idle = IntPtr.Zero;
-            try { HideDock(); } catch (Exception ex) { Logger.Write("idle: " + ex); }
+            try
+            {
+                HideDock();
+            }
+            catch (Exception ex) { Logger.Write("idle: " + ex); }
             return 0;
         }
 
@@ -480,7 +629,8 @@ namespace Launcher
             {
                 string key = Marshal.PtrToStringAnsi(Marshal.ReadIntPtr(eventInfo));
                 if (Navigation.IsEcho(key, Efl.ecore_time_get())) return;
-                HandleKey(key);
+                if (_settingsCtl != null && _settingsCtl.IsActive) HandleSettingsKey(key);
+                else HandleKey(key);
             }
             catch (Exception ex) { Logger.Write("key: " + ex); }
         }
@@ -489,6 +639,13 @@ namespace Launcher
         {
             _perfWhy = "home";
             if (_homeLaunch != null) { LauncherSvc.LaunchApp(_homeLaunch); LauncherSvc.ArmGuard(); return; }
+            if (_settingsCtl != null && _settingsCtl.IsActive)
+            {
+                CloseSettings(playSound: false);
+                HideDock();
+                LauncherSvc.ArmGuard();
+                return;
+            }
             if (_ctl.Phase == Phase.Showing || _ctl.Phase == Phase.Hiding)
             {
                 OnRawHomeBurst();
@@ -501,7 +658,13 @@ namespace Launcher
         private static void OnRawHomeBurst()
         {
             if (_homeLaunch != null) { LauncherSvc.ArmGuard(); return; }
-            if (_ctl.IsActive)
+            if (_settingsCtl != null && _settingsCtl.IsActive)
+            {
+                _settingsModal.ShowWindow();
+                ScheduleReactivate();
+                ResetIdle(SettingsIdleSeconds);
+            }
+            else if (_ctl.IsActive)
             {
                 Efl.evas_object_show(_win);
                 Efl.elm_win_activate(_win);
@@ -513,8 +676,13 @@ namespace Launcher
 
         private static void OnRawNav(int code)
         {
-            string key = Navigation.Press(code, _ctl.IsActive, Efl.ecore_time_get());
-            if (key != null) HandleKey(key);
+            bool anyActive = _ctl.IsActive || (_settingsCtl != null && _settingsCtl.IsActive);
+            string key = Navigation.Press(code, anyActive, Efl.ecore_time_get());
+            if (key != null)
+            {
+                if (_settingsCtl != null && _settingsCtl.IsActive) HandleSettingsKey(key);
+                else HandleKey(key);
+            }
         }
 
         private static void HandleKey(string key)
@@ -591,6 +759,149 @@ namespace Launcher
             return 1;
         }
 
+        private static void HandleSettingsKey(string key)
+        {
+            try
+            {
+                SettingsKeyResult res = _settingsCtl.Key(key);
+                switch (res.Action)
+                {
+                    case SettingsActionKind.Moved:
+                        SoundPlayer.Play(SoundEffect.Move);
+                        _settingsModal.Apply(_settingsCtl, _inputs);
+                        StartAnimator();
+                        ResetIdle(SettingsIdleSeconds);
+                        break;
+                    case SettingsActionKind.Changed:
+                        _fileSettings.SaveAtomic(_confPath);
+                        ApplyEffectiveSettings();
+                        SoundPlayer.SetEnabled(_effectiveSettings.EffectiveSoundEnabled);
+                        SoundPlayer.Play(SoundEffect.Move);
+                        _appsDock.InvalidateChrome();
+                        _inputsDock.InvalidateChrome();
+                        StartClock();
+                        _dock.Apply(_ctl);
+                        _settingsCtl.RefreshLabels();
+                        _settingsModal.Apply(_settingsCtl, _inputs);
+                        StartAnimator();
+                        if (res.NeedsWeatherRefresh && Weather.Enabled) StartWeatherRefreshPoll();
+                        ResetIdle(SettingsIdleSeconds);
+                        break;
+                    case SettingsActionKind.SearchCity:
+                        SoundPlayer.Play(SoundEffect.Move);
+                        _settingsModal.Apply(_settingsCtl, _inputs);
+                        StartAnimator();
+                        StartCitySearch(res.Query);
+                        ResetIdle(SettingsIdleSeconds);
+                        break;
+                    case SettingsActionKind.SwitchInput:
+                        CloseSettings(playSound: false);
+                        AppEntry[] hdmi = _settingsCtl.HdmiInputs;
+                        if (res.Index >= 0 && res.Index < hdmi.Length) LaunchDirect(hdmi[res.Index]);
+                        break;
+                    case SettingsActionKind.LaunchApps:
+                        CloseSettings(playSound: false);
+                        LaunchDirect(_samsungAppsEntry);
+                        break;
+                    case SettingsActionKind.LaunchVetro:
+                        CloseSettings(playSound: false);
+                        LaunchDirect(_vetroEntry);
+                        break;
+                    case SettingsActionKind.LaunchTvStore:
+                        CloseSettings(playSound: false);
+                        LaunchDirect(_tvStoreEntry);
+                        break;
+                    case SettingsActionKind.LaunchTvSettings:
+                        CloseSettings(playSound: false);
+                        LaunchDirect(_tvSettingsEntry);
+                        break;
+                    case SettingsActionKind.Close:
+                        CloseSettings(playSound: true);
+                        break;
+                    case SettingsActionKind.CloseAll:
+                        if (key == "XF86Home")
+                        {
+                            double now = Efl.ecore_time_get();
+                            if (now - _input.LastRawHome < HomeEchoSeconds)
+                            {
+                                Logger.Write("home echo ignored " + ((now - _input.LastRawHome) * 1000).ToString("0") + " ms after the press");
+                                _settingsModal.ShowWindow();
+                                break;
+                            }
+                            _input.LastHome = now;
+                            CloseSettings(playSound: false);
+                            HideDock();
+                            LauncherSvc.ArmGuard();
+                            break;
+                        }
+                        CloseSettings(playSound: false);
+                        HideDock();
+                        break;
+                }
+            }
+            catch (Exception ex) { Logger.Write("settings key: " + ex); }
+        }
+
+        private static void EnsurePollTimer()
+        {
+            if (_pollTimer == IntPtr.Zero)
+                _pollTimer = Efl.ecore_timer_add(0.12, PollAsyncCb, IntPtr.Zero);
+        }
+
+        private static void StartWeatherRefreshPoll()
+        {
+            try
+            {
+                _weatherTask = Weather.Refresh();
+                EnsurePollTimer();
+            }
+            catch (Exception ex) { Logger.Write("weather refresh: " + ex.Message); }
+        }
+
+        private static void StartCitySearch(string query)
+        {
+            int gen = Interlocked.Increment(ref _citySearchGen);
+            EnsurePollTimer();
+            Weather.SearchCityAsync(query, Localization.Language).ContinueWith(t =>
+            {
+                if (Volatile.Read(ref _citySearchGen) != gen) return;
+                GeoSearchOutcome outcome = t.IsFaulted
+                    ? new GeoSearchOutcome(new GeoResult[0], t.Exception?.GetBaseException().Message ?? "error")
+                    : t.Result;
+                _pendingCityGen = gen;
+                Interlocked.Exchange(ref _pendingCityOutcome, outcome);
+            });
+        }
+
+        private static byte OnPollAsync(IntPtr data)
+        {
+            try
+            {
+                GeoSearchOutcome city = Interlocked.Exchange(ref _pendingCityOutcome, null);
+                if (city != null && _settingsCtl != null && _pendingCityGen == _citySearchGen && _settingsCtl.View == SettingsView.CitySearch && _settingsCtl.CityBusy)
+                {
+                    _settingsCtl.SetCitySearchResults(city.Results, city.Error);
+                    _settingsModal.Apply(_settingsCtl, _inputs);
+                }
+
+                bool weatherDone = (_weatherTask != null && _weatherTask.IsCompleted && !Weather.IsRefreshing);
+                if (weatherDone)
+                {
+                    _weatherTask = null;
+                    _appsDock.InvalidateChrome();
+                    _inputsDock.InvalidateChrome();
+                    if (_ctl != null && _ctl.IsActive && _dock != null) _dock.Apply(_ctl);
+                }
+
+                bool stillBusy = _weatherTask != null || Weather.IsRefreshing
+                    || (_settingsCtl != null && _settingsCtl.CityBusy);
+                if (stillBusy) return 1;
+            }
+            catch (Exception ex) { Logger.Write("poll: " + ex.Message); }
+            _pollTimer = IntPtr.Zero;
+            return 0;
+        }
+
         private static void Activate(AppEntry e)
         {
             if (e.Panel != null)
@@ -598,6 +909,17 @@ namespace Launcher
                 if (e.Panel == "inputs") OpenInputs(); else Logger.Write("unknown panel " + e.Panel);
                 return;
             }
+            if (e.Slug == "settings")
+            {
+                OpenSettings();
+                return;
+            }
+            LaunchDirect(e);
+        }
+
+        private static void LaunchDirect(AppEntry e)
+        {
+            if (e == null) return;
             SoundPlayer.Play(SoundEffect.Launch);
             if (LauncherSvc.ShouldCancelGuard(e.AppId)) LauncherSvc.CancelGuard();
             HideDock(playSound: false);
@@ -667,7 +989,6 @@ namespace Launcher
                 Logger.Write("start pid=" + Libc.getpid() + " uid=" + Libc.getuid() + " engine=" + engine);
 
                 string res = Path.Combine(AppContext.BaseDirectory, "res");
-                SoundPlayer.Init(Path.Combine(res, "sounds"), Logger.Write, Flag(args, "--no-sound"));
 
                 Efl.elm_init(0, IntPtr.Zero);
                 _win = Efl.elm_win_add(IntPtr.Zero, "tvlauncher", Efl.ElmWinNotification);
@@ -685,8 +1006,14 @@ namespace Launcher
                 }
                 Logger.Write("screen reported " + sw + "x" + sh + ", layout " + screenW + "x" + screenH);
 
-                _apps = LoadApps(Arg(args, "--apps") ?? Path.Combine(res, "apps.tsv"));
+                Weather.Init(_dir);
+                SetupLocalization(args);
+                SoundPlayer.Init(Path.Combine(res, "sounds"), Logger.Write, Flag(args, "--no-sound"), _effectiveSettings.EffectiveSoundEnabled);
+
+                AppEntry[] rawApps;
+                _apps = LoadApps(Arg(args, "--apps") ?? Path.Combine(res, "apps.tsv"), out rawApps);
                 _inputs = LoadList(Arg(args, "--inputs") ?? Path.Combine(res, "inputs.tsv"), Catalog.BuiltInInputs);
+                ConfigureShortcuts(rawApps);
                 int leftPins = Catalog.LeftPinCount(_apps);
                 int group = Catalog.GroupStart(_apps);
                 var layout = new DockLayout(_apps.Length, screenW, screenH, 0, false, group, leftPins, true);
@@ -709,8 +1036,6 @@ namespace Launcher
 
                 string dumpIcons = Arg(args, "--dump-icons");
                 if (dumpIcons != null && Directory.Exists(dumpIcons)) Dock.DumpIconsTo = dumpIcons;
-                Weather.Init(_dir);
-                SetupLocalization(args);
                 Weather.LoadCache();
                 try { Weather.Refresh(); } catch (Exception ex) { Logger.Write("weather refresh: " + ex.Message); }
                 Logger.Write("weather " + (Weather.Text ?? "none") + (Weather.LastError != null ? " (" + Weather.LastError + ")" : ""));
@@ -724,6 +1049,13 @@ namespace Launcher
                 if (!Flag(args, "--no-warmup")) WarmUp();
                 _appsDock.Apply(_appsCtl);
                 _inputsDock.Apply(_inputsCtl);
+
+                _settingsCtl = new SettingsController(_fileSettings, _inputs);
+                _settingsModal = new SettingsModal(layout, screenW, screenH, res, Logger.Write);
+                _settingsModal.Build();
+                if (_settingsModal.Win != IntPtr.Zero)
+                    Efl.evas_object_event_callback_add(_settingsModal.Win, Efl.EvasCallbackKeyDown, KeyCb, IntPtr.Zero);
+
                 Logger.Write("engine in use: " + (Efl.EngineName(_dock.Evas) ?? "unknown") + ", " + _apps.Length + " apps, " + _inputs.Length + " inputs, "
                     + (_appsDock.MissingIcons + _inputsDock.MissingIcons) + " icons missing");
 

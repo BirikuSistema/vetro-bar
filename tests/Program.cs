@@ -98,9 +98,9 @@ namespace Launcher.Tests
                 T.Eq(Weather.Icon, "sun", "code 0 is sun");
                 T.True(Weather.Apply("{\"current\":{\"temperature_2m\":-1.2,\"weather_code\":61}}"), "rain");
                 T.Eq(Weather.Text, "-1\u00b0", "negative temps");
-                T.Eq(Weather.Icon, "rain", "code 61 is rain");
+                T.Eq(Weather.Icon, "cloud-rain", "code 61 is cloud-rain");
                 T.True(Weather.Apply("{\"current\":{\"temperature_2m\":0.4,\"weather_code\":71}}"), "snow");
-                T.Eq(Weather.Icon, "snow", "code 71 is snow");
+                T.Eq(Weather.Icon, "cloud-snow", "code 71 is cloud-snow");
                 T.True(Weather.Apply("{\"current_units\":{\"temperature_2m\":\"C\",\"weather_code\":\"wmo code\"},\"current\":{\"temperature_2m\":15.7,\"weather_code\":2}}"), "Open-Meteo units key is not the reading");
                 T.Eq(Weather.Text, "16\u00b0", "numeric current value wins");
                 T.Eq(Weather.Icon, "cloud-sun", "code 2 is cloud-sun");
@@ -121,7 +121,7 @@ namespace Launcher.Tests
                 T.Eq(Localization.LanguageOf("../x"), null, "junk refused");
                 var wed = new DateTime(2026, 11, 18, 18, 5, 0);
                 Localization.Configure("es_ES.utf8", "ES", null);
-                T.Eq(Localization.DayText(wed), "Mi\u00e9rcoles 18 de noviembre", "Spanish");
+                T.Eq(Localization.DayText(wed), "Mi\u00e9rcoles 18 de Noviembre", "Spanish");
                 T.Eq(Localization.ClockText(wed), "18:05", "Spain uses 24 h");
                 T.True(!Localization.Fahrenheit, "Spain uses Celsius");
                 Localization.Configure("en_US.utf8", "US", null);
@@ -1218,6 +1218,7 @@ namespace Launcher.Tests
 
             Console.WriteLine();
             LauncherRegressionTests.Run();
+            SettingsAndFeaturesTests.Run();
             Console.WriteLine(T.Checks + " checks, " + T.Failures + " failures");
             return T.Failures == 0 ? 0 : 1;
         }

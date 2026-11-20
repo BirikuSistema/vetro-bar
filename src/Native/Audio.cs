@@ -93,14 +93,30 @@ namespace Launcher.Native
         private static readonly AutoResetEvent Wake = new AutoResetEvent(false);
         private static volatile int _pending = -1;
         private static volatile bool _stopping;
+        private static volatile bool _enabled = true;
+        private static volatile bool _closeRequested;
+        private static bool _cliDisabled;
         private static Thread _worker;
         private static bool _loggedPlayError;
 
-        public static void Init(string soundsDir, Action<string> log, bool disabled)
+        public static bool Enabled { get { return _enabled && !_cliDisabled; } }
+
+        public static void Init(string soundsDir, Action<string> log, bool cliDisabled, bool initialEnabled = true)
         {
             _log = log ?? (_ => { });
-            if (disabled) { _log("sound: disabled (--no-sound)"); return; }
-            if (!Directory.Exists(soundsDir)) { _log("sound: directory not found (" + soundsDir + ")"); return; }
+            _cliDisabled = cliDisabled;
+            if (cliDisabled)
+            {
+                _enabled = false;
+                _log("sound: disabled (--no-sound)");
+                return;
+            }
+            if (!Directory.Exists(soundsDir))
+            {
+                _enabled = false;
+                _log("sound: directory not found (" + soundsDir + ")");
+                return;
+            }
 
             int loaded = 0;
             for (int i = 0; i < FileNames.Length; i++)
@@ -126,14 +142,21 @@ namespace Launcher.Native
                 catch (Exception ex) { _log("sound: load " + FileNames[i] + ": " + ex.Message); }
             }
 
-            if (loaded == 0) { _log("sound: no clips loaded"); return; }
+            if (loaded == 0)
+            {
+                _enabled = false;
+                _log("sound: no clips loaded");
+                return;
+            }
+
+            _enabled = initialEnabled;
 
             if (TryOpenPulse())
             {
                 ClosePulse();   // do not hold the sink open while idle
                 _backend = Backend.PulseSimple;
                 StartWorker();
-                _log("sound: PulseAudio ready on-demand (" + loaded + " clips, " + _rate + " Hz)");
+                _log("sound: PulseAudio ready on-demand (" + loaded + " clips, " + _rate + " Hz, enabled=" + _enabled + ")");
                 return;
             }
 
@@ -141,7 +164,7 @@ namespace Launcher.Native
             {
                 _backend = Backend.WavPlayer;
                 StartWorker();
-                _log("sound: wav_player ready (" + loaded + " clips)");
+                _log("sound: wav_player ready (" + loaded + " clips, enabled=" + _enabled + ")");
                 return;
             }
 
@@ -152,12 +175,24 @@ namespace Launcher.Native
                     _cliBin = bin;
                     _backend = Backend.Cli;
                     StartWorker();
-                    _log("sound: cli fallback " + bin + " (" + loaded + " clips)");
+                    _log("sound: cli fallback " + bin + " (" + loaded + " clips, enabled=" + _enabled + ")");
                     return;
                 }
             }
 
             _log("sound: no supported audio backend found");
+        }
+
+        public static void SetEnabled(bool enabled)
+        {
+            if (_cliDisabled || _backend == Backend.None) { _enabled = false; return; }
+            _enabled = enabled;
+            if (!enabled)
+            {
+                _pending = -1;
+                _closeRequested = true;
+                Wake.Set();
+            }
         }
 
         private static bool TryOpenPulse()
@@ -215,7 +250,7 @@ namespace Launcher.Native
         /// <summary>Non-blocking, zero-allocation trigger safe to call from the EFL main loop.</summary>
         public static void Play(SoundEffect effect)
         {
-            if (_backend == Backend.None) return;
+            if (!_enabled || _cliDisabled || _backend == Backend.None) return;
             int idx = (int)effect;
             if (idx < 0 || idx >= Clips.Length || Clips[idx] == null) return;
             _pending = idx;
@@ -228,6 +263,13 @@ namespace Launcher.Native
             {
                 bool signaled = Wake.WaitOne(_pa != IntPtr.Zero ? IdleCloseMs : Timeout.Infinite);
                 if (_stopping) break;
+                if (_closeRequested || !_enabled)
+                {
+                    _closeRequested = false;
+                    Interlocked.Exchange(ref _pending, -1);
+                    ClosePulse();
+                    continue;
+                }
                 if (!signaled)
                 {
                     // Idle timeout elapsed with no new sound: release the PulseAudio stream so tizenaudio-sink never wedges.
@@ -235,7 +277,7 @@ namespace Launcher.Native
                     continue;
                 }
                 int idx = Interlocked.Exchange(ref _pending, -1);
-                if (idx < 0) continue;
+                if (idx < 0 || !_enabled) continue;
                 SoundClip clip = Clips[idx];
                 if (clip == null) continue;
                 PlayClip(clip);
