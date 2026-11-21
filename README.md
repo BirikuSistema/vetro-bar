@@ -1,6 +1,6 @@
 # vetro-bar
 
-An overlay for the native dock of Vetro (0.5.x) on Samsung Tizen TVs. It is not a fork of Vetro: you build the launcher DLL and copy it over the live installation. If Vetro updates itself, run `apply.sh` again; `restore.sh` puts back the dock that was there before the first apply.
+An overlay for the native dock of [Vetro](https://github.com/andrearicci93/vetro) (0.5.x) on Samsung Tizen TVs. It is not a fork of Vetro: you build the launcher DLL and copy it over the live installation. If Vetro updates itself, run `apply.sh` again; `restore.sh` puts back the dock that was there before the first apply.
 
 Developed and tested on a Samsung QE55Q65AAUXXC (Tizen 6, firmware `T-NKLADEUC-2310.0`). Other Tizen 6 TVs with Vetro installed should work, but are untested.
 
