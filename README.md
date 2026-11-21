@@ -8,16 +8,24 @@ Developed and tested on a Samsung QE55Q65AAUXXC (Tizen 6, firmware `T-NKLADEUC-2
 
 On top of the video, inside the pill:
 
-- **TV** at the left (opens the DVB tuner app `TdtSwitch0.Tv`), followed by a divider
+- **TV** at the left (opens the DVB tuner app `TdtSwitch0.Tv`), followed by a divider (the selector always starts focused here on launch)
 - your apps in the middle, scrolling
 - **Settings** and **Samsung Home** at the right, stacked, icon only
 
 Outside the pill:
 
-- local weather at the left (Open-Meteo)
+- local weather at the left (Open-Meteo) with day/night weather conditions
 - date and clock at the right
 
-UI sounds (48 kHz PCM through PulseAudio, loaded in memory; disable with `--no-sound`):
+Settings drawer (opened by clicking **Settings** icon):
+
+- 5 quick-access tiles: HDMI Inputs, Apps, Vetro, TV-Store, and TV Settings
+- Weather toggles: show/hide, auto-IP vs manual location (with built-in virtual keyboard city search via Open-Meteo geocoding), city name display, low/high display, and units (°C / °F)
+- Clock & date options: 12h/24h toggle, date visibility, and date format (Long, Short, Numeric, ISO)
+- Audio options: toggle UI sounds directly on/off
+- Visual changes are styled with official **Phosphor Icons** (`regular`) across all system tiles, weather, and settings UI
+
+UI sounds (48 kHz PCM through PulseAudio, loaded in memory; disable with `--no-sound` or in the Settings drawer):
 
 - `res/sounds/open.wav` when the dock appears
 - `res/sounds/close.wav` when it hides
@@ -50,8 +58,15 @@ Everything is optional. Priority: command line, environment variable, then `vetr
 ```ini
 # language=es          # en es fr de it pt nl
 # location=41.65,-4.72 # latitude,longitude; no IP lookup is made
+# location_name=Madrid # friendly display name
+# weather_mode=manual  # auto or manual
+# show_weather=true    # true or false
+# show_clock=true      # true or false
 # clock=24             # 12 or 24
+# show_date=true       # true or false
+# date_format=long     # long, short, numeric, iso
 # units=c              # c or f
+# sound=true           # true or false
 ```
 
 The same four settings exist as `--lang`, `--location`, `--clock`, `--units` and as `TVLAUNCHER_LANG`, `TVLAUNCHER_LOCATION`, `TVLAUNCHER_CLOCK`, `TVLAUNCHER_UNITS`.
