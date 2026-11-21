@@ -25,6 +25,7 @@ SYSTEM = {
 TILE_BLUE = (0x00, 0x5F, 0x73)
 
 GLYPH_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "glyphs", "regular")
+CUSTOM_GLYPH_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "glyphs", "custom")
 
 
 def _flat_tile(rim=True):
@@ -78,9 +79,10 @@ def _tile(accent):
     return base
 
 
-def _load_glyph(name, box_px, tint=None):
-    """Load a Phosphor regular glyph, crop to its ink bbox, fit into `box_px`, optionally tint RGB."""
-    g = Image.open(os.path.join(GLYPH_DIR, name + ".png")).convert("RGBA")
+def _load_glyph(name, box_px, tint=None, directory=None):
+    """Load a glyph PNG, crop to its ink bbox, fit into `box_px`, optionally tint RGB."""
+    base_dir = directory if directory is not None else GLYPH_DIR
+    g = Image.open(os.path.join(base_dir, name + ".png")).convert("RGBA")
     bbox = g.getchannel("A").getbbox()
     if bbox:
         g = g.crop(bbox)
@@ -101,10 +103,10 @@ def _load_glyph(name, box_px, tint=None):
     return g
 
 
-def _phosphor(name, box):
-    """White Phosphor regular glyph fitted into a box of `box` px (at 128 scale) and optically centred."""
+def _phosphor(name, box, directory=None):
+    """White glyph fitted into a box of `box` px (at 128 scale) and optically centred."""
     def draw(d, c, acc):
-        g = _load_glyph(name, box * SS)
+        g = _load_glyph(name, box * SS, directory=directory)
         layer = Image.new("RGBA", (SIZE * SS, SIZE * SS), (0, 0, 0, 0))
         layer.alpha_composite(g, ((SIZE * SS - g.width) // 2, (SIZE * SS - g.height) // 2))
         return ("image", layer)
@@ -327,18 +329,20 @@ UI_ICONS = [
     "house",
 ]
 
+# slug -> (glyph_name, box_px, is_custom)
 QUICK_TILES = {
-    "qs-hdmi": "plug",
-    "qs-apps": "squares-four",
-    "qs-vetro": "wrench",
-    "qs-store": "storefront",
-    "qs-settings": "gear",
+    "qs-hdmi": ("hdmi", 82, True),
+    "qs-apps": ("squares-four", 62, False),
+    "qs-vetro": ("vetro", 68, True),
+    "qs-store": ("tv-store", 70, True),
+    "qs-settings": ("gear", 62, False),
 }
 
 
 def render_quick_tiles(icons_dir):
-    for slug, glyph_name in QUICK_TILES.items():
-        _render(None, _phosphor(glyph_name, 62), os.path.join(icons_dir, slug + ".png"), flat=True)
+    for slug, (glyph_name, box, is_custom) in QUICK_TILES.items():
+        directory = CUSTOM_GLYPH_DIR if is_custom else GLYPH_DIR
+        _render(None, _phosphor(glyph_name, box, directory=directory), os.path.join(icons_dir, slug + ".png"), flat=True)
 
 
 def _render_switch(on, out_path):
