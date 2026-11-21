@@ -6,104 +6,150 @@ Developed and tested on a Samsung QE55Q65AAUXXC (Tizen 6, firmware `T-NKLADEUC-2
 
 ## What it changes
 
-On top of the video, inside the pill:
+On top of the video, inside the dock pill:
 
-- **TV** at the left (opens the DVB tuner app `TdtSwitch0.Tv`), followed by a divider (the selector always starts focused here on launch)
-- your apps in the middle, scrolling
-- **Settings** and **Samsung Home** at the right, stacked, icon only
+- **TV** at the left (opens the DVB tuner app `TdtSwitch0.Tv`), followed by a divider. The selector always starts focused here whenever the dock opens.
+- Your apps in the middle, scrolling horizontally.
+- **Settings** and **Samsung Home** at the right, stacked, icon-only.
 
 Outside the pill:
 
-- local weather at the left (Open-Meteo) with day/night weather conditions
-- date and clock at the right
+- Local weather at the left (Open-Meteo), supporting both day and night icon variants (`is_day`).
+- Date and clock at the right.
 
-Settings drawer (opened by clicking **Settings** icon):
+### Settings Drawer
 
-- 5 quick-access tiles: HDMI Inputs, Apps, Vetro, TV-Store, and TV Settings
-- Weather toggles: show/hide, auto-IP vs manual location (with built-in virtual keyboard city search via Open-Meteo geocoding), city name display, low/high display, and units (°C / °F)
-- Clock & date options: 12h/24h toggle, date visibility, and date format (Long, Short, Numeric, ISO)
-- Audio options: toggle UI sounds directly on/off
-- Visual changes are styled with official **Phosphor Icons** (`regular`) across all system tiles, weather, and settings UI
+Clicking on the **Settings** icon opens a dedicated bottom-anchored modal panel:
 
-UI sounds (48 kHz PCM through PulseAudio, loaded in memory; disable with `--no-sound` or in the Settings drawer):
+- **Quick-Access Tiles:** Direct shortcuts to HDMI Inputs, Apps list, Vetro dashboard, TV-Store, and native Samsung TV Settings.
+- **HDMI Inputs Panel:** Dedicated HDMI source selector (HDMI 1–4) with visual active-source indicators.
+- **Weather Configuration:**
+  - Toggle weather display on/off.
+  - Switch between automatic IP geolocation or manual location.
+  - Interactive city search with an on-screen virtual keyboard powered by the Open-Meteo geocoding API.
+  - Toggles for displaying the city name and daily low/high temperatures.
+  - Temperature unit selection (°C, °F, or auto by country).
+- **Clock & Date:**
+  - Toggle clock on/off.
+  - 12h / 24h format selection.
+  - Toggle date on/off.
+  - Date format selection (Long, Short, Numeric, ISO).
+- **Sound:** Toggle UI sound effects on/off.
+- **Iconography:** All system icons, weather conditions, navigation carets, and settings UI controls are rendered from official **[Phosphor Icons](https://phosphoricons.com/)** in `regular` style.
+
+### UI Sounds
+
+Subtle, non-intrusive sound effects (48 kHz PCM stereo through PulseAudio, loaded into memory):
 
 - `res/sounds/open.wav` when the dock appears
 - `res/sounds/close.wav` when it hides
-- `res/sounds/move.wav` when moving between tiles
-- `res/sounds/launch.wav` when an app is launched
+- `res/sounds/move.wav` when navigating between tiles
+- `res/sounds/launch.wav` when launching an app
 
-There is no Sources page and no HDMI tiles. The app list comes from Vetro's own list on the TV, not from this repository.
+Sounds can be disabled in the Settings drawer or with the `--no-sound` CLI flag. The PulseAudio stream is opened on-demand and closed after 1.5 seconds of inactivity to avoid locking Samsung's audio sink across standby or HDMI switches.
 
-## Language, time and weather: automatic
+The app list is managed by Vetro on the TV; this repository only overrides the dock presentation and behavior.
 
-Nothing needs configuring. The dock follows the TV:
+---
 
-| What | Where it comes from |
+## Language, Time and Weather: Automatic
+
+By default, everything adapts automatically without manual configuration:
+
+| Feature | Source / Behavior |
 | --- | --- |
-| Language of the date and the Low/High label | TV menu language (`db/menu_widget/language`), falling back to `$LANG`, then English. Built in: `en es fr de it pt nl` |
-| Time and daylight saving | The TV's own time zone (`/etc/localtime`), re-read every time the dock opens and every minute |
-| 12 h / 24 h clock | By country (12 h in US, CA, AU, NZ, PH; 24 h elsewhere) |
-| °C / °F | By country (°F in US and a few others) |
-| Weather location | Your public IP address, looked up with [ipwho.is](https://ipwho.is/) (fallback [ipapi.co](https://ipapi.co/)), cached for 24 h; the last known place is used when offline |
+| Date & UI Language | Follows the TV menu language (`db/menu_widget/language`), falling back to `$LANG`, then English. Built-in translations: `en`, `es`, `fr`, `de`, `it`, `pt`, `nl`. |
+| Time & DST | Follows the TV's system timezone (`/etc/localtime`), re-evaluated every time the dock opens and once per minute. |
+| 12h / 24h Clock | Auto-detected by country (12h for US, CA, AU, NZ, PH; 24h elsewhere). |
+| °C / °F Units | Auto-detected by country (°F for US and a few others; °C elsewhere). |
+| Weather Location | Auto-detected via public IP using [ipwho.is](https://ipwho.is/) (fallback [ipapi.co](https://ipapi.co/)), cached for 24 hours. The last known location is retained when offline. |
 
 > [!NOTE]
-> The IP lookup sends your TV's public IP address to those two services, and the forecast request sends coordinates (rounded to three decimals) to [Open-Meteo](https://open-meteo.com/). To avoid the lookup, set a fixed location as shown below.
+> Automatic IP geolocation queries public lookup services, and forecast requests send approximate coordinates (rounded to 3 decimal places) to [Open-Meteo](https://open-meteo.com/). If you prefer not to make external IP lookups, choose **Manual** in the Settings drawer or define a fixed location in `vetro-bar.conf`.
 
-### Overrides
+---
 
-Everything is optional. Priority: command line, environment variable, then `vetro-bar.conf`, then automatic.
+## Configuration & Overrides
 
-`vetro-bar.conf` lives next to the weather cache on the TV (`/opt/usr/home/owner/share/vetro-bar.conf`):
+Settings can be customized interactively in the **Settings drawer** (which saves directly to `vetro-bar.conf`), or manually via configuration file, CLI arguments, or environment variables.
+
+Priority order: **CLI Arguments > Environment Variables > `vetro-bar.conf` > Automatic TV Defaults**.
+
+### `vetro-bar.conf`
+
+Located at `/opt/usr/home/owner/share/vetro-bar.conf`:
 
 ```ini
-# language=es          # en es fr de it pt nl
-# location=41.65,-4.72 # latitude,longitude; no IP lookup is made
-# location_name=Madrid # friendly display name
+# language=es          # en, es, fr, de, it, pt, nl
+# location=41.65,-4.72 # latitude,longitude (bypasses IP lookup)
+# location_name=Madrid # custom display name for manual location
 # weather_mode=manual  # auto or manual
 # show_weather=true    # true or false
+# weather_show_location=false # true or false
+# weather_show_minmax=true    # true or false
 # show_clock=true      # true or false
 # clock=24             # 12 or 24
 # show_date=true       # true or false
 # date_format=long     # long, short, numeric, iso
 # units=c              # c or f
 # sound=true           # true or false
+# tv_store_app=A2STVStore.Store # custom app ID for TV-Store shortcut
 ```
 
-The same four settings exist as `--lang`, `--location`, `--clock`, `--units` and as `TVLAUNCHER_LANG`, `TVLAUNCHER_LOCATION`, `TVLAUNCHER_CLOCK`, `TVLAUNCHER_UNITS`.
+Supported CLI flags and environment variables:
+- `--lang` / `TVLAUNCHER_LANG`
+- `--location` / `TVLAUNCHER_LOCATION`
+- `--clock` / `TVLAUNCHER_CLOCK`
+- `--units` / `TVLAUNCHER_UNITS`
+- `--sound` / `TVLAUNCHER_SOUND`
 
-To add a language, add one entry to the table in `src/Core/Localization.cs` (day names, month names, Low/High words and the date pattern).
+To add a new language, add an entry to the dictionary in `src/Core/Localization.cs`.
 
-## Layout
+---
 
-- `src/` the dock. `Core/` is pure logic (layout, catalog, weather, localization, WAV) and has tests; `Host/` handles evdev input, app launching and the log; `Native/` is P/Invoke (EFL, libc, PulseAudio); `Ui/` draws with EFL.
-- `tests/` desktop tests: `dotnet run --project tests`.
-- `res/` images and sounds (`icons/`, `weather/`, `sounds/`).
-- `tools/` generators (`system_icons.py`, `make-glass.cjs`) and the overlay script.
-- `designer/` a standalone page to try out the look.
-- `apply.sh` / `restore.sh` / `status.sh` overlay on the TV.
+## Project Structure
 
-## Build
+- `src/`: The launcher codebase:
+  - `Core/`: Pure logic (dock layout, catalog parsing, weather engine, localization, settings model, WAV parsing). Unit-tested without TV dependencies.
+  - `Host/`: Host OS integration (evdev input handling via inotify, application launching, Home-guard process management, logging).
+  - `Native/`: Native interop (EFL/Elementary P/Invoke, libc, PulseAudio `libpulse-simple`).
+  - `Ui/`: EFL rendering for the main dock (`Dock.cs`) and the modal settings drawer (`SettingsModal.cs`).
+- `tests/`: Desktop unit test suite (`dotnet run --project tests`).
+- `res/`: Graphical assets (Phosphor icons, weather glyphs) and UI sound clips (`sounds/`).
+- `tools/`: Python asset generators (`system_icons.py`, `svg_raster.py`), glass shader generators (`make-glass.cjs`), and the overlay deployment script (`overlay.py`).
+- `designer/`: Standalone web preview tool to test dimensions and visual parameters.
+- `apply.sh` / `restore.sh` / `status.sh`: TV deployment scripts.
+
+---
+
+## Building & Testing
+
+Requires .NET Core 3.1 SDK:
 
 ```sh
-sh build.sh                          # netcoreapp3.1
-dotnet run --project tests           # pure logic, no TV needed
+sh build.sh                   # Builds Release netcoreapp3.1 DLL
+dotnet run --project tests    # Executes desktop test suite (5500+ checks)
 ```
 
-## Install and uninstall
+---
 
-Nothing uses `sdb`: on these TVs root over `sdb` is disabled, and the developer-mode host IP has to stay `127.0.0.1` so Vetro's agent starts. The scripts talk to that agent on port 8099 of your TV.
+## Installation & Deployment
+
+Communication with the TV is handled over HTTP via Vetro's local agent on port 8099 (root access over `sdb` is disabled on production Tizen 6 firmware):
 
 ```sh
-export TV_IP=192.168.1.50            # your TV's IP address (required)
-sh apply.sh                          # first run keeps Vetro's dock, then installs this one
-sh status.sh
-sh restore.sh                        # puts the original dock back and restarts it
+export TV_IP=192.168.1.50     # Replace with your TV's IP address (required)
+sh apply.sh                   # Backs up stock dock on first run and deploys vetro-bar
+sh status.sh                  # Inspects running dock PID, checksums, and recent logs
+sh restore.sh                 # Restores the original stock dock and restarts it
 ```
 
-The original is kept on the TV in `native/dock/.vetro-bar-stock/`, next to the running dock, and later applies leave it alone.
+On first run, `apply.sh` archives Vetro's original dock in `native/dock/.vetro-bar-stock/` on the TV. Running `restore.sh` reinstalls that pristine backup at any time.
 
-If a Vetro update deletes that folder, the next `apply.sh` saves the new Vetro and then installs this dock. If the old copy is still there and you want `restore.sh` to return to the updated Vetro, delete `.vetro-bar-stock` on the TV and run `apply.sh` again.
+---
 
-## Credits
+## Credits & License
 
-Icon glyphs in `tools/glyphs` are from [Phosphor Icons](https://phosphoricons.com/) (see `tools/glyphs/LICENSE-phosphor.txt`).
+- Licensed under the [MIT License](LICENSE).
+- Icon glyphs in `tools/glyphs/regular` are from **[Phosphor Icons](https://phosphoricons.com/)** ([MIT License](tools/glyphs/LICENSE-phosphor.txt)).
+- UI sound effects derived from royalty-free clips under the [Pixabay Content License](https://pixabay.com/service/license-summary/).
