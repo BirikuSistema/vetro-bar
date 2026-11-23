@@ -17,6 +17,9 @@ namespace Launcher.Host
     {
         private const string SourceIconDir = "/usr/apps/com.samsung.tv.theme-resource/shared/res/org.tizen.menu/Settings_Popup/device_icon/";
         private const string KeyTool = "/usr/bin/input_keyevent ";
+        private const string TunerPipe = "/tmp/vetro-tuner.ctl";
+
+        public int ServicePort { get; set; } = 8099;
 
         private readonly Efl.TaskCb _keyTimerCb;
         private readonly object _guardLock = new object();
@@ -120,9 +123,28 @@ namespace Launcher.Host
             }
         }
 
+        public bool ResumeTuner(string why, bool live = false)
+        {
+            int fd = Libc.open(TunerPipe, Libc.O_WRONLY | Libc.O_NONBLOCK);
+            if (fd < 0) return false;
+            try
+            {
+                byte[] b = System.Text.Encoding.ASCII.GetBytes(live ? "live\n" : "resume\n");
+                Libc.write(fd, b, (UIntPtr)b.Length);
+                Logger.Write("tuner: " + (live ? "live" : "resume") + " (" + why + ")");
+                return true;
+            }
+            catch (Exception) { return false; }
+            finally { Libc.close(fd); }
+        }
+
         public void Execute(AppEntry e)
         {
-            if (e.SourceType >= 0) SwitchSource(e);
+            if (e.SourceType >= 0)
+            {
+                SwitchSource(e);
+                if (e.SourceType == 0 && ResumeTuner("TV input chosen", true)) return;
+            }
             if (e.AppId != null || e.Key != null || e.SourceType < 0) Launch(e);
         }
 
@@ -146,6 +168,13 @@ namespace Launcher.Host
                 {
                     int rc = Libc.system("( /usr/bin/app_launcher -k " + e.KillFirst + "; sleep 0.4; /usr/bin/app_launcher -s " + e.AppId + " ) >/dev/null 2>&1 &");
                     Logger.Write("launch " + e.AppId + " after closing " + e.KillFirst + " rc=" + rc);
+                    return;
+                }
+                if (e.ViaShard && e.Slug != null && e.AppId != null && Catalog.ValidAppId(e.AppId))
+                {
+                    string url = "http://127.0.0.1:" + ServicePort.ToString(CultureInfo.InvariantCulture) + "/plugins/launcher/api/open?slug=" + e.Slug;
+                    int rc = Libc.system("( /usr/bin/curl -sf -m 5 -X POST '" + url + "' >/dev/null 2>&1 || /usr/bin/app_launcher -s " + e.AppId + " >/dev/null 2>&1 ) &");
+                    Logger.Write("launch " + e.AppId + " via shard (" + e.Slug + ") rc=" + rc);
                     return;
                 }
                 if (HomeGuard.ShouldCancel(_guardApps, e.AppId)) CancelGuard();

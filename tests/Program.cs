@@ -67,7 +67,7 @@ namespace Launcher.Tests
 
         private static int Main()
         {
-            T.Run("catalog: overlay bar is TV → apps → settings/home; HDMI and Sources go", () =>
+            T.Run("catalog: overlay bar is TV → apps → allapps/home; settings move to All Apps bar", () =>
             {
                 var r = Catalog.Parse(
                     "livetv\tLive TV\tsource:0\n" +
@@ -78,16 +78,23 @@ namespace Launcher.Tests
                     "samsunghome\tSamsung Home\tsys:com.samsung.tv.csfs\n");
                 T.Eq(r.Problems.Length, 0, "sample catalog is valid");
                 var bar = Catalog.ArrangeBar(r.Entries);
-                T.Eq(bar.Length, 4, "tv + app + settings + home");
+                T.Eq(bar.Length, 4, "tv + app + allapps + home");
                 T.Eq(bar[0].AppId, Design.TdtAppId, "TV launches TDT");
                 T.Eq(bar[0].Label, "TV", "Live TV is labelled TV");
                 T.Eq(bar[0].SourceType, 0, "TV switches the tuner, so HDMI does not stay");
                 T.Eq(bar[1].Slug, "netflix", "apps follow the TV pin");
-                T.Eq(bar[2].Slug, "settings", "settings stay on the right");
+                T.Eq(bar[2].Slug, "allapps", "allapps replaces settings on the main bar");
+                T.Eq(bar[2].Panel, "allapps", "allapps opens the allapps panel");
                 T.Eq(bar[3].Slug, "samsunghome", "home stays on the right");
                 T.Eq(Catalog.LeftPinCount(bar), 1, "TV is the left pin");
                 T.Eq(Catalog.GroupStart(bar), 2, "system group at the end");
                 T.Eq(Catalog.ArrangeBar(Catalog.BuiltIn())[0].AppId, Design.TdtAppId, "built-in Live TV is remapped too");
+
+                var allBar = Catalog.ArrangeAllApps(null, r.Entries);
+                T.Eq(allBar.Length, 4, "tv + app + settings + tvstore in All Apps");
+                T.Eq(allBar[allBar.Length - 2].Slug, "settings", "settings sits on the right of All Apps");
+                T.Eq(allBar[allBar.Length - 1].Slug, "tvstore", "tvstore sits on the right of All Apps");
+                T.Eq(Catalog.GroupStart(allBar), 2, "system group at the end of All Apps");
             });
 
             T.Run("weather: Open-Meteo JSON becomes a temperature and an icon", () =>

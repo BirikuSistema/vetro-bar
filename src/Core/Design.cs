@@ -70,6 +70,11 @@ namespace Launcher.Core
         public const int DividerColor = 0xFFFFFF;
         public const float DividerAlpha = 0.3f;
 
+        // ---- Volume Pill ----
+        public const float VolumeAlpha = 0.82f;
+        public const float VolumeBorderAlpha = 0.20f;
+        public const int VolumeFillColor = 0x0088A3;
+
         // ---- Motion ----
         /// <summary>Fade-in time of the bar; each icon then takes the same time, starting a little after the previous one.</summary>
         public const double EnterSeconds = 0.42;

@@ -44,6 +44,21 @@ namespace Launcher.Core
         /// </summary>
         public readonly string KillFirst;
 
+        /// <summary>
+        /// True when a Vetro plugin has taken this tile over (seventh column "shard").
+        /// </summary>
+        public readonly bool ViaShard;
+
+        /// <summary>
+        /// The key Vetro knows this tile by in the user's own row (eighth column: app:id, live:RF, source:13).
+        /// </summary>
+        public readonly string RowKey;
+
+        /// <summary>
+        /// The app's HbbTV link (ninth column), or null.
+        /// </summary>
+        public readonly string HbbtvLink;
+
         public AppEntry(string slug, string label, string appId, string fallbackAppId)
             : this(slug, label, appId, fallbackAppId, null) { }
 
@@ -60,9 +75,13 @@ namespace Launcher.Core
             : this(slug, label, appId, fallbackAppId, key, sourceType, panel, systemApp, iconPath, null) { }
 
         public AppEntry(string slug, string label, string appId, string fallbackAppId, string key, int sourceType, string panel, bool systemApp, string iconPath, string killFirst)
+            : this(slug, label, appId, fallbackAppId, key, sourceType, panel, systemApp, iconPath, killFirst, false, null, null) { }
+
+        public AppEntry(string slug, string label, string appId, string fallbackAppId, string key, int sourceType, string panel, bool systemApp, string iconPath, string killFirst, bool viaShard, string rowKey = null, string hbbtvLink = null)
         {
             Slug = slug; Label = label; AppId = appId; FallbackAppId = fallbackAppId; Key = key;
             SourceType = sourceType; Panel = panel; SystemApp = systemApp; IconPath = iconPath; KillFirst = killFirst;
+            ViaShard = viaShard; RowKey = rowKey; HbbtvLink = hbbtvLink;
         }
     }
 
@@ -163,6 +182,9 @@ namespace Launcher.Core
                 string fallback = f.Length > 3 ? f[3].Trim() : "";
                 string icon = f.Length > 4 ? f[4].Trim() : "";
                 string killFirst = f.Length > 5 ? f[5].Trim() : "";
+                string via = f.Length > 6 ? f[6].Trim() : "";
+                string rowKey = f.Length > 7 ? f[7].Trim() : "";
+                string hbbtvLink = f.Length > 8 ? f[8].Trim() : "";
                 string key = null, panel = null;
                 int sourceType = -1;
                 bool special = false, systemApp = false;
@@ -201,7 +223,8 @@ namespace Launcher.Core
                 if (killFirst.Length > 0 && !IsAppId(killFirst)) { problems.Add("line " + (n + 1) + ": bad kill-first app id"); continue; }
                 if (!seen.Add(slug)) { problems.Add("line " + (n + 1) + ": duplicate slug " + slug); continue; }
                 if (entries.Count >= MaxEntries) { problems.Add("line " + (n + 1) + ": more than " + MaxEntries + " entries, ignored"); continue; }
-                entries.Add(new AppEntry(slug, label, appId.Length > 0 ? appId : null, fallback.Length > 0 ? fallback : null, key, sourceType, panel, systemApp, icon.Length > 0 ? icon : null, killFirst.Length > 0 ? killFirst : null));
+                bool viaShard = via == "shard" && !special && !systemApp && appId.Length > 0;
+                entries.Add(new AppEntry(slug, label, appId.Length > 0 ? appId : null, fallback.Length > 0 ? fallback : null, key, sourceType, panel, systemApp, icon.Length > 0 ? icon : null, killFirst.Length > 0 ? killFirst : null, viaShard, rowKey.Length > 0 ? rowKey : null, hbbtvLink.Length > 0 ? hbbtvLink : null));
             }
             return new CatalogResult(entries.ToArray(), problems.ToArray());
         }
@@ -234,37 +257,86 @@ namespace Launcher.Core
         }
 
         /// <summary>
-        /// Overlay order: TV (TDT) at the left pin, then apps, then Settings and Samsung Home.
-        /// HDMI tiles and the Sources page are dropped. Missing pieces are omitted.
+        /// Overlay order for the main dock: TV (TDT) at the left pin, then apps, then All Apps and Samsung Home.
+        /// HDMI tiles and the Sources page are dropped. Settings moved to the All Apps bar.
         /// </summary>
         public static AppEntry[] ArrangeBar(AppEntry[] raw)
         {
             if (raw == null || raw.Length == 0) return raw ?? new AppEntry[0];
-            AppEntry tv = null, settings = null, home = null;
+            AppEntry tv = null, allApps = null, home = null;
+            bool hadSystem = false;
             var apps = new List<AppEntry>();
             foreach (AppEntry e in raw)
             {
                 if (e == null) continue;
+                if (e.Slug == "allapps" || e.Panel == "allapps")
+                {
+                    allApps = new AppEntry("allapps", "All apps", null, null, null, -1, "allapps");
+                    hadSystem = true;
+                    continue;
+                }
                 if (e.Panel != null) continue;
                 if (IsHdmi(e)) continue;
-                if (e.Slug == "settings") { settings = e; continue; }
-                if (e.Slug == "samsunghome") { home = e; continue; }
+                if (e.Slug == "settings") { hadSystem = true; continue; }
+                if (e.Slug == "samsunghome") { home = e; hadSystem = true; continue; }
                 if (tv == null && IsTv(e))
                 {
                     // Source 0 is the tuner. Launching an app alone leaves HDMI where it is,
                     // because tv-viewer is already on screen. The TDT app is tried after the switch.
-                    tv = new AppEntry("livetv", e.Label == "Live TV" ? "TV" : e.Label, Design.TdtAppId, null, null, 0, null, false, null, null);
+                    tv = new AppEntry("livetv", e.Label == "Live TV" ? "TV" : e.Label, Design.TdtAppId, null, null, 0, null, false, null, null, false, e.RowKey);
                     continue;
                 }
                 if (IsTv(e)) continue;
                 apps.Add(e);
             }
+            if (allApps == null && hadSystem)
+                allApps = new AppEntry("allapps", "All apps", null, null, null, -1, "allapps");
             var outList = new List<AppEntry>();
             if (tv != null) outList.Add(tv);
             outList.AddRange(apps);
-            if (settings != null) outList.Add(settings);
+            if (allApps != null) outList.Add(allApps);
             if (home != null) outList.Add(home);
             if (outList.Count == 0) return raw;
+            if (outList.Count > MaxEntries) outList.RemoveRange(MaxEntries, outList.Count - MaxEntries);
+            return outList.ToArray();
+        }
+
+        /// <summary>
+        /// Overlay order for the All Apps bar: all installed apps (with Live TV mapped to TDT/source:0),
+        /// followed by Settings (opens our Settings Modal) and TV-Store stacked at the right.
+        /// </summary>
+        public static AppEntry[] ArrangeAllApps(AppEntry[] rawAll, AppEntry[] fallbackApps = null)
+        {
+            AppEntry[] source = (rawAll != null && rawAll.Length > 0) ? rawAll : (fallbackApps ?? new AppEntry[0]);
+            AppEntry settings = null, store = null;
+            var apps = new List<AppEntry>();
+            var seen = new HashSet<string>();
+            foreach (AppEntry e in source)
+            {
+                if (e == null) continue;
+                if (e.Slug == "allapps" || e.Panel != null || e.Slug == "samsunghome") continue;
+                if (IsHdmi(e)) continue;
+                if (e.Slug == "settings") { settings = e; continue; }
+                if (e.Slug == "tvstore" || e.Slug == "store")
+                {
+                    store = new AppEntry("tvstore", "TV-Store", e.AppId ?? "A2STVStore.Store", e.FallbackAppId ?? "com.samsung.tv.store", null, -1, null, true);
+                    continue;
+                }
+                if (IsTv(e))
+                {
+                    if (seen.Add("livetv"))
+                        apps.Add(new AppEntry("livetv", e.Label == "Live TV" ? "TV" : e.Label, Design.TdtAppId, null, null, 0, null, false, null, null, false, e.RowKey));
+                    continue;
+                }
+                if (seen.Add(e.Slug)) apps.Add(e);
+            }
+            if (settings == null)
+                settings = new AppEntry("settings", "Settings", "org.tizen.menu", null, "XF86SysMenu", -1, null);
+            if (store == null)
+                store = new AppEntry("tvstore", "TV-Store", "A2STVStore.Store", "com.samsung.tv.store", null, -1, null, true);
+            var outList = new List<AppEntry>(apps);
+            outList.Add(settings);
+            outList.Add(store);
             if (outList.Count > MaxEntries) outList.RemoveRange(MaxEntries, outList.Count - MaxEntries);
             return outList.ToArray();
         }
@@ -273,6 +345,16 @@ namespace Launcher.Core
         public static int LeftPinCount(AppEntry[] entries)
         {
             return entries != null && entries.Length > 0 && IsTv(entries[0]) ? 1 : 0;
+        }
+
+        /// <summary>The All apps page fallback when Vetro wrote no list for it.</summary>
+        public static AppEntry[] BuiltInAllApps()
+        {
+            return new[]
+            {
+                new AppEntry("settings", "Settings", "org.tizen.menu", null, "XF86SysMenu", -1, null),
+                new AppEntry("tvstore", "TV-Store", "A2STVStore.Store", "com.samsung.tv.store", null, -1, null, true),
+            };
         }
 
         /// <summary>TV and the four HDMI inputs; used when res/inputs.tsv is missing or empty.</summary>

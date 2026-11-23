@@ -29,6 +29,7 @@ namespace Launcher.Native
         [UnmanagedFunctionPointer(CallingConvention.Cdecl)] public delegate byte TaskCb(IntPtr data);
         [UnmanagedFunctionPointer(CallingConvention.Cdecl)] public delegate byte FdCb(IntPtr data, IntPtr handler);
         [UnmanagedFunctionPointer(CallingConvention.Cdecl)] public delegate void EvasCb(IntPtr data, IntPtr evas, IntPtr obj, IntPtr eventInfo);
+        [UnmanagedFunctionPointer(CallingConvention.Cdecl)] public delegate byte EventCb(IntPtr data, int type, IntPtr ev);
 
         // --- elementary ---
         [DllImport(Elm)] public static extern int elm_init(int argc, IntPtr argv);
@@ -43,6 +44,7 @@ namespace Launcher.Native
         [DllImport(Elm)] public static extern void elm_win_layer_set(IntPtr win, int layer);
         [DllImport(Elm)] public static extern int elm_win_aux_hint_add(IntPtr win, string hint, string val);
         [DllImport(Elm)] public static extern void elm_win_activate(IntPtr win);
+        [DllImport(Elm)] [return: MarshalAs(UnmanagedType.U1)] public static extern bool elm_win_keygrab_set(IntPtr win, string key, ulong modifiers, ulong notModifiers, int priority, int grabMode);
         [DllImport(Elm)] public static extern void elm_win_screen_size_get(IntPtr win, out int x, out int y, out int w, out int h);
 
         // --- evas: generic objects ---
@@ -55,6 +57,8 @@ namespace Launcher.Native
         [DllImport(Evas)] public static extern void evas_object_clip_set(IntPtr obj, IntPtr clip);
         [DllImport(Evas)] public static extern void evas_object_event_callback_add(IntPtr obj, int type, EvasCb cb, IntPtr data);
         [DllImport(Evas)] public static extern IntPtr evas_object_rectangle_add(IntPtr evas);
+        [DllImport(Evas)] public static extern void evas_object_pass_events_set(IntPtr obj, [MarshalAs(UnmanagedType.U1)] bool pass);
+        [DllImport(Evas)] public static extern void evas_object_del(IntPtr obj);
 
         // --- evas: images ---
         [DllImport(Evas)] public static extern IntPtr evas_object_image_add(IntPtr evas);
@@ -98,6 +102,7 @@ namespace Launcher.Native
         [DllImport(Ecore)] public static extern IntPtr ecore_timer_del(IntPtr timer);
         [DllImport(Ecore)] public static extern IntPtr ecore_main_fd_handler_add(int fd, int flags, FdCb func, IntPtr data, IntPtr bufFunc, IntPtr bufData);
         [DllImport(Ecore)] public static extern IntPtr ecore_main_fd_handler_del(IntPtr handler);
+        [DllImport(Ecore)] public static extern IntPtr ecore_event_handler_add(int type, EventCb func, IntPtr data);
 
         // --- diagnostics ---
         [DllImport(EcoreEvas)] public static extern IntPtr ecore_evas_ecore_evas_get(IntPtr evas);

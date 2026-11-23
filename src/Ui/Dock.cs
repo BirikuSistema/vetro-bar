@@ -40,6 +40,7 @@ namespace Launcher.Ui
         private IntPtr _hintChev, _hintText;
         private readonly string _hint;
         private readonly bool _hintUp;
+        private readonly bool _showSideChrome;
         private int _hintW, _hintX, _hintAlpha = -1, _hintY = int.MinValue;
         private Box _dividerBox;
         private int _dividerAlpha = -1;
@@ -61,14 +62,15 @@ namespace Launcher.Ui
         public int MissingIcons { get; private set; }
 
         public Dock(IntPtr win, DockLayout layout, AppEntry[] items, string assetsDir, Action<string> log)
-            : this(win, layout, items, assetsDir, log, null, false) { }
+            : this(win, layout, items, assetsDir, log, null, false, true) { }
 
         /// <param name="hint">Word of the navigation hint ("Input", "Back"), or null for none.</param>
         /// <param name="hintUp">True: chevron up, capsule above the pill; false: chevron down, below it.</param>
-        public Dock(IntPtr win, DockLayout layout, AppEntry[] items, string assetsDir, Action<string> log, string hint, bool hintUp)
+        /// <param name="showSideChrome">True: build and draw weather and clock side pills when Design.SideChrome is enabled.</param>
+        public Dock(IntPtr win, DockLayout layout, AppEntry[] items, string assetsDir, Action<string> log, string hint, bool hintUp, bool showSideChrome = true)
         {
             _win = win; _layout = layout; _items = items; _assets = assetsDir; _log = log;
-            _hint = hint; _hintUp = hintUp;
+            _hint = hint; _hintUp = hintUp; _showSideChrome = showSideChrome;
             _evas = Efl.evas_object_evas_get(win);
             _icon = new IntPtr[items.Length];
             _initials = new IntPtr[items.Length];
@@ -130,7 +132,7 @@ namespace Launcher.Ui
                 Efl.evas_object_show(_dividerLeft);
                 _dividerLeftBox.W = -1;
             }
-            if (Design.SideChrome) BuildSideChrome();
+            if (_showSideChrome && Design.SideChrome) BuildSideChrome();
 
             if (Design.ShowLabels)
                 for (int k = 0; k < 2; k++)
@@ -722,7 +724,7 @@ namespace Launcher.Ui
 
             if (Design.ShowLabels) ApplyLabels(c, slide, presence, scroll);
             if (Design.ShowClock) ApplyClock(slide, presence);
-            if (Design.SideChrome) ApplySideChrome(presence, c.SideShift);
+            if (_showSideChrome && Design.SideChrome) ApplySideChrome(presence, c.SideShift);
             if (_hintText != IntPtr.Zero) ApplyHint(slide, presence);
         }
 

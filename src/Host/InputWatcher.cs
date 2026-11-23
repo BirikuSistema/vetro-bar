@@ -46,6 +46,13 @@ namespace Launcher.Host
 
         public double LastRawHome { get; private set; } = -100;
         public double LastHome { get { return _lastHome; } set { _lastHome = value; } }
+        public bool HasOpenNodes { get { return _fds.Exists(fd => fd >= 0); } }
+
+        public void Rescan()
+        {
+            try { WatchNewNodes(); }
+            catch (Exception ex) { Logger.Write("input: rescan: " + ex.Message); }
+        }
 
         public InputWatcher(Action onHome, Action onHomeBurst, Action<int> onNav)
         {

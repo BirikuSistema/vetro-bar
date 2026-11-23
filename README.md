@@ -1,25 +1,42 @@
 # vetro-bar
 
-An overlay for the native dock of [Vetro](https://github.com/andrearicci93/vetro) (0.5.x) on Samsung Tizen TVs. It is not a fork of Vetro: you build the launcher DLL and copy it over the live installation. If Vetro updates itself, run `apply.sh` again; `restore.sh` puts back the dock that was there before the first apply.
+An enhanced overlay for the native dock and overlay ecosystem of [Vetro](https://github.com/andrearicci93/vetro) (0.7.0, with backward compatibility for 0.5.x–0.6.x) on Samsung Tizen TVs. It is not a fork of Vetro: you build the launcher DLL and copy it over the live installation. If Vetro updates itself, run `apply.sh` again; `restore.sh` puts back the dock that was there before the first apply.
 
-Developed and tested on a Samsung QE55Q65AAUXXC (Tizen 6, firmware `T-NKLADEUC-2310.0`). Other Tizen 6 TVs with Vetro installed should work, but are untested.
+Developed and tested on a Samsung QE55Q65AAUXXC (Tizen 6, firmware `T-NKLADEUC-2310.0`, paired with a Sonos Beam on HDMI eARC). Other Tizen 6 TVs with Vetro installed should work.
+
+---
 
 ## What it changes
+
+### 1. Main Dock Pill
 
 On top of the video, inside the dock pill:
 
 - **TV** at the left (opens the DVB tuner app `TdtSwitch0.Tv`), followed by a divider. The selector always starts focused here whenever the dock opens.
-- Your apps in the middle, scrolling horizontally.
-- **Settings** and **Samsung Home** at the right, stacked, icon-only.
+- Your favorite apps in the middle, scrolling horizontally.
+- **All Apps** (`squares-four`) and **Samsung Home** (`house`) at the right, stacked, icon-only.
 
 Outside the pill:
 
-- Local weather at the left (Open-Meteo), supporting both day and night icon variants (`is_day`).
-- Date and clock at the right.
+- **Local weather** at the left (Open-Meteo), supporting both day and night icon variants (`is_day`).
+- **Date and clock** at the right.
 
-### Settings Drawer
+---
 
-Clicking on the **Settings** icon opens a dedicated bottom-anchored modal panel:
+### 2. All Apps Bar & Settings Integration
+
+In Vetro 0.7.0, Vetro introduces an **All Apps** catalog (`vetro-dock-allapps.tsv`). `vetro-bar` adopts this seamlessly:
+
+- The rightmost stacked tiles feature **All Apps** and **Samsung Home**.
+- Selecting **All Apps** slides out the full horizontal catalog containing all installed applications, inputs, and system tools.
+- **Settings** (`gear`) and **TV-Store** (`tv-store`) are elegantly placed inside this All Apps bar.
+- **Clean Focus & Geometry:** While the All Apps bar is open, the weather and clock side pills are automatically hidden so that they do not overlap or crowd the screen.
+
+---
+
+### 3. Settings Drawer
+
+Clicking on the **Settings** icon (accessible from All Apps or via shortcut) opens a dedicated bottom-anchored modal panel:
 
 - **Quick-Access Tiles:** Direct shortcuts to HDMI Inputs, Apps list, Vetro dashboard, TV-Store, and native Samsung TV Settings.
 - **HDMI Inputs Panel:** Dedicated HDMI source selector (HDMI 1–4) with visual active-source indicators.
@@ -37,7 +54,38 @@ Clicking on the **Settings** icon opens a dedicated bottom-anchored modal panel:
 - **Sound:** Toggle UI sound effects on/off.
 - **Iconography:** All system icons, weather conditions, navigation carets, and settings UI controls are rendered from official **[Phosphor Icons](https://phosphoricons.com/)** in `regular` style.
 
-### UI Sounds
+---
+
+### 4. Volume Pill & Sonos / UPnP Integration
+
+`vetro-bar` includes a dedicated native volume pill that integrates directly with external sound systems and ARC/eARC receivers:
+
+- **Placement:** Positionable on any screen edge (`--volume-edge left|right|top|bottom|hidden`). Defaults to `left`.
+- **UPnP / Sonos Discovery:** Discovers network soundbars (such as Sonos Beam on HDMI 2) via SSDP and UPnP `RenderingControl:1`, fetching the true current hardware volume and mute status without relying solely on Samsung's CEC approximation.
+- **Samsung Volume OSD Suppression:**
+  - On Samsung TVs, pressing volume buttons with an external audio system often triggers Samsung's native, opaque volume OSD (`tv-viewer-graphics` / `0x001ce200`), resulting in duplicate volume bars.
+  - When `vetro-bar`'s volume pill is active, it automatically sets the system vconf key `db/volume/appid` to `org.vetro.noop` and restarts `hdmicec-service` once. This completely suppresses Samsung's native volume banner while keeping HDMI-CEC ARC audio control intact.
+  - If `--volume-edge hidden` is chosen, `vetro-bar` automatically restores `org.tizen.tv-viewer` as the volume app handler.
+
+---
+
+### 5. Fast Channel Zapping & Tuner Optimizations
+
+Along with the dock, `vetro-bar` includes critical optimizations for `vetro-tuner` on Samsung Tizen:
+
+- **Samsung-Style Coalescing for Rapid Zapping (`CH+` / `CH-`):**
+  - The first `CH+` or `CH-` press tunes immediately (`0 ms` latency).
+  - Rapid subsequent presses (or holding `CH+`/`CH-`) update the channel banner indicator instantly on each click, but coalesce the hardware `Tvs.Tune` call (`0.38 s` window). This prevents `tvs-daemon` from locking and aborting intermediate DVB-T multiplexes, reducing rapid multi-channel zapping from 4–5+ seconds down to instant feedback.
+- **Prioritized Hardware Tuning:**
+  - EPG programme requests (`IServiceGuide`) are deferred by `0.65 s` after a tune, ensuring RPC calls do not compete with `tvs-daemon` during tuner frequency lock.
+- **GuideStore Stale-Entry Fix:**
+  - Resolves a bug in `GuideStore.PutFailed` where channels without immediate EPG data never had their timestamp updated, causing continuous EPG re-read spam to `tvs-daemon` every 20 seconds.
+- **Cached IPC Proxies:**
+  - Reuses `IServiceNavigation`, `ISourceControl`, and `IServiceGuide` proxy instances across requests on the worker thread, avoiding redundant IPC connection churn.
+
+---
+
+### 6. UI Sounds
 
 Subtle, non-intrusive sound effects (48 kHz PCM stereo through PulseAudio, loaded into memory):
 
@@ -47,8 +95,6 @@ Subtle, non-intrusive sound effects (48 kHz PCM stereo through PulseAudio, loade
 - `res/sounds/launch.wav` when launching an app
 
 Sounds can be disabled in the Settings drawer or with the `--no-sound` CLI flag. The PulseAudio stream is opened on-demand and closed after 1.5 seconds of inactivity to avoid locking Samsung's audio sink across standby or HDMI switches.
-
-The app list is managed by Vetro on the TV; this repository only overrides the dock presentation and behavior.
 
 ---
 
@@ -93,6 +139,7 @@ Located at `/opt/usr/home/owner/share/vetro-bar.conf`:
 # date_format=long     # long, short, numeric, iso
 # units=c              # c or f
 # sound=true           # true or false
+# volume_edge=left     # left, right, top, bottom, hidden
 # tv_store_app=A2STVStore.Store # custom app ID for TV-Store shortcut
 ```
 
@@ -102,20 +149,20 @@ Supported CLI flags and environment variables:
 - `--clock` / `TVLAUNCHER_CLOCK`
 - `--units` / `TVLAUNCHER_UNITS`
 - `--sound` / `TVLAUNCHER_SOUND`
-
-To add a new language, add an entry to the dictionary in `src/Core/Localization.cs`.
+- `--volume-edge` / `TVLAUNCHER_VOLUME_EDGE`
+- `--all-apps` (path to `allapps.tsv`)
 
 ---
 
 ## Project Structure
 
 - `src/`: The launcher codebase:
-  - `Core/`: Pure logic (dock layout, catalog parsing, weather engine, localization, settings model, WAV parsing). Unit-tested without TV dependencies.
-  - `Host/`: Host OS integration (evdev input handling via inotify, application launching, Home-guard process management, logging).
-  - `Native/`: Native interop (EFL/Elementary P/Invoke, libc, PulseAudio `libpulse-simple`).
-  - `Ui/`: EFL rendering for the main dock (`Dock.cs`) and the modal settings drawer (`SettingsModal.cs`).
+  - `Core/`: Pure logic (dock layout, catalog parsing, weather engine, localization, settings model, volume placement, WAV parsing). Unit-tested without TV dependencies.
+  - `Host/`: Host OS integration (evdev input handling, application launching, Home-guard process management, UPnP Sonos client, logging).
+  - `Native/`: Native interop (EFL/Elementary P/Invoke, libc, PulseAudio `libpulse-simple`, audio output query).
+  - `Ui/`: EFL rendering for the main dock (`Dock.cs`), modal settings drawer (`SettingsModal.cs`), and volume pill (`VolumePill.cs`).
 - `tests/`: Desktop unit test suite (`dotnet run --project tests`).
-- `res/`: Graphical assets (Phosphor icons, weather glyphs) and UI sound clips (`sounds/`).
+- `res/`: Graphical assets (Phosphor icons, weather glyphs, volume indicators) and UI sound clips (`sounds/`).
 - `tools/`: Python asset generators (`system_icons.py`, `svg_raster.py`), glass shader generators (`make-glass.cjs`), and the overlay deployment script (`overlay.py`).
 - `designer/`: Standalone web preview tool to test dimensions and visual parameters.
 - `apply.sh` / `restore.sh` / `status.sh`: TV deployment scripts.

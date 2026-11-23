@@ -17,8 +17,10 @@ RIM_ALPHA = int(round(255 * layout_consts.design_num("IconRimAlpha")))
 
 # slug -> (label, target, fallback app or None, accent)
 SYSTEM = {
+    "allapps": ("All apps", "panel:allapps", None, (196, 204, 220)),
     "settings": ("Settings", "key:XF86SysMenu", "org.tizen.menu", (196, 204, 220)),
     "samsunghome": ("Samsung Home", "sys:com.samsung.tv.csfs", None, (196, 204, 220)),
+    "tvstore": ("TV-Store", "sys:A2STVStore.Store", "com.samsung.tv.store", (196, 204, 220)),
 }
 
 # One flat dark blue for the TV, Settings and Home tiles.
@@ -113,11 +115,13 @@ def _phosphor(name, box, directory=None):
     return draw
 
 
-GLYPH_HEIGHT = {"settings": 23, "samsunghome": 22}
+GLYPH_HEIGHT = {"allapps": 22, "settings": 23, "samsunghome": 22, "tvstore": 23}
 GLYPH_BOX = 62
 GLYPHS = {
+    "allapps": _phosphor("squares-four", GLYPH_BOX),
     "settings": _phosphor("gear", GLYPH_BOX),
     "samsunghome": _phosphor("house", GLYPH_BOX),
+    "tvstore": _phosphor("tv-store", 70, directory=CUSTOM_GLYPH_DIR),
 }
 
 # The inputs panel: slug -> (label, Samsung SourceType, accent). TV is 0, HDMI 1-4 are 13-16.

@@ -34,21 +34,26 @@ namespace Launcher
         private static readonly Efl.TaskCb PremapCb = OnPremap;
         private static readonly Efl.TaskCb ReactivateCb = OnReactivate;
         private static readonly Efl.TaskCb PollAsyncCb = OnPollAsync;
+        private static readonly Efl.EventCb EcoreKeyCb = OnEcoreKey;
 
         private static readonly CommandBuffer Commands = new CommandBuffer();
         private static readonly NavigationInput Navigation = new NavigationInput();
         private static readonly AppLauncher LauncherSvc = new AppLauncher();
+        private static readonly SonosClient Sonos = new SonosClient();
         private static readonly byte[] ReadBuf = new byte[128];
+        private static readonly byte[] SmackStar = { (byte)'*' };
+        private const int KeygrabExclusive = 1 << 10;
 
         private static InputWatcher _input;
-        private static string _dir, _pidPath, _fifoPath, _confPath;
+        private static string _dir, _pidPath, _fifoPath, _confPath, _claimPath, _resDir;
         private static IntPtr _win, _anim, _idle, _fifoHandler, _clockTimer, _weatherTimer, _weatherSoonTimer, _premapTimer, _reactivateTimer, _pollTimer;
         private static int _reactivateLeft;
         private static int _fifoFd = -1;
         private static double _lastFrame;
-        private static AppEntry[] _apps, _inputs;
-        private static Controller _ctl, _appsCtl, _inputsCtl;
-        private static Dock _dock, _appsDock, _inputsDock;
+        private static int _screenW = DefaultScreenW, _screenH = DefaultScreenH;
+        private static AppEntry[] _apps, _allApps, _inputs;
+        private static Controller _ctl, _appsCtl, _allCtl, _inputsCtl;
+        private static Dock _dock, _appsDock, _allDock, _inputsDock;
         private static AppEntry _pendingLaunch;
         private static AppEntry _homeLaunch;
         private static AppEntry _tvSettingsEntry, _tvStoreEntry, _samsungAppsEntry, _vetroEntry;
@@ -56,6 +61,16 @@ namespace Launcher
         private static string _tvLanguage, _tvCountry;
         private static SettingsController _settingsCtl;
         private static SettingsModal _settingsModal;
+        private static VolumeEdge _volumeEdge = VolumeEdge.Left;
+        private static VolumePill _pill;
+        private static int _trackedVolume = -1;
+        private static int _levelBeforeMute;
+        private static bool _virtualMuted;
+        private static double _lastFifoVolumeAt = -100;
+        private static double _lastRawVolumeAt = -100;
+        private static double _lastSonosReadAt = -100;
+        private static bool _claimHome, _claimTried, _homeClaimed;
+        private static bool _dockMapped;
         private static GeoSearchOutcome _pendingCityOutcome;
         private static int _citySearchGen;
         private static int _pendingCityGen;
@@ -160,11 +175,14 @@ namespace Launcher
         {
             try
             {
+                OverlayFlag.Mark(OverlayFlag.DockPath, false);
+                OverlayFlag.Mark(OverlayFlag.PadPath, false);
                 int pid;
                 if (File.Exists(_pidPath) && int.TryParse(File.ReadAllText(_pidPath).Trim(), out pid) && pid == Libc.getpid())
                 {
                     File.Delete(_pidPath);
                     Libc.unlink(_fifoPath);
+                    if (_claimPath != null) Libc.unlink(_claimPath);
                 }
             }
             catch (Exception) { }
@@ -175,6 +193,8 @@ namespace Launcher
             Libc.unlink(_fifoPath);
             if (Libc.mkfifo(_fifoPath, 438u) != 0) { Logger.Write("mkfifo failed: " + Marshal.GetLastWin32Error()); return; }
             Libc.chmod(_fifoPath, 438u);
+            try { Libc.setxattr(_fifoPath, "security.SMACK64", SmackStar, (UIntPtr)SmackStar.Length, 0); }
+            catch (Exception) { }
             _fifoFd = Libc.open(_fifoPath, Libc.O_RDWR | Libc.O_NONBLOCK);
             if (_fifoFd < 0) { Logger.Write("open fifo failed: " + Marshal.GetLastWin32Error()); return; }
             _fifoHandler = Efl.ecore_main_fd_handler_add(_fifoFd, Efl.EcoreFdRead, FifoCb, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero);
@@ -184,6 +204,12 @@ namespace Launcher
         {
             raw = LoadList(path, Catalog.BuiltIn);
             return Catalog.ArrangeBar(raw);
+        }
+
+        private static AppEntry[] LoadAllApps(string path, AppEntry[] rawApps)
+        {
+            AppEntry[] rawAll = File.Exists(path) ? LoadList(path, Catalog.BuiltInAllApps) : null;
+            return Catalog.ArrangeAllApps(rawAll, rawApps);
         }
 
         private static string FindInstalledApp(params string[] candidates)
@@ -264,10 +290,13 @@ namespace Launcher
             if (!_ctl.IsActive) _ctl.SetFocus(0);
             if (!_ctl.Show()) { ResetIdle(); return; }
 
+            _dockMapped = true;
+            OverlayFlag.Mark(OverlayFlag.DockPath, true, Logger.Write);
             SoundPlayer.Play(SoundEffect.Open);
             _dock.Apply(_ctl);
             Efl.evas_object_show(_win);
             Efl.elm_win_activate(_win);
+            TryClaimHome();
             ScheduleReactivate();
             StartClock();
             StartAnimator();
@@ -379,6 +408,15 @@ namespace Launcher
             ResetIdle();
         }
 
+        private static void OpenAllApps()
+        {
+            if (_allCtl == null || _allDock == null) return;
+            SoundPlayer.Play(SoundEffect.Move);
+            _allCtl.SetFocus(0);
+            Logger.Write("all apps page, " + _allApps.Length + " entries");
+            SelectPage(_allCtl, _allDock);
+        }
+
         private static void OpenInputs()
         {
             int current = -1, type;
@@ -450,8 +488,10 @@ namespace Launcher
             string t = ClockText();
             string day = DayText();
             _appsDock.SetClock(t);
+            if (_allDock != null) _allDock.SetClock(t);
             _inputsDock.SetClock(t);
             _appsDock.SetDay(day);
+            if (_allDock != null) _allDock.SetDay(day);
             _inputsDock.SetDay(day);
             if (_clockTimer != IntPtr.Zero) Efl.ecore_timer_del(_clockTimer);
             DateTime now = DateTime.Now;
@@ -550,9 +590,15 @@ namespace Launcher
                 if (_ctl.Phase == Phase.Hidden)
                 {
                     Efl.evas_object_hide(_win);
+                    if (_dockMapped)
+                    {
+                        _dockMapped = false;
+                        OverlayFlag.Mark(OverlayFlag.DockPath, false, Logger.Write);
+                    }
                     AppEntry pending = _pendingLaunch;
                     _pendingLaunch = null;
                     if (pending != null) LauncherSvc.Execute(pending);
+                    else LauncherSvc.ResumeTuner("dock closed", false);
                 }
                 if (_perf) PerfSample(dt, (Stopwatch.GetTimestamp() - t0) * 1000.0 / Stopwatch.Frequency, !(more || moreSet));
                 if (more || moreSet) return 1;
@@ -600,6 +646,8 @@ namespace Launcher
             _premapTimer = IntPtr.Zero;
             try
             {
+                // Claim XF86Home while the window surface is mapped during invisible startup pre-map (#282 fix).
+                TryClaimHome();
                 if (_ctl.Phase == Phase.Hidden)
                 {
                     _ctl.Reset();
@@ -676,6 +724,19 @@ namespace Launcher
 
         private static void OnRawNav(int code)
         {
+            // Fallback for volume keys (68=VolUp, 67=VolDown, 66=VolMute) when a Bluetooth remote reconnects
+            // on a new UHID evdev node (e.g. event17) that Vetro's input bridge (stuck on event5) is not grabbing.
+            if (code == 68 || code == 67 || code == 66)
+            {
+                double now = Efl.ecore_time_get();
+                if (now - _lastFifoVolumeAt > 0.35 && now - _lastRawVolumeAt > 0.08)
+                {
+                    _lastRawVolumeAt = now;
+                    Command cmd = code == 68 ? Command.VolUp : (code == 67 ? Command.VolDown : Command.VolMute);
+                    VolumeKey(cmd, fromFifo: false);
+                }
+                return;
+            }
             bool anyActive = _ctl.IsActive || (_settingsCtl != null && _settingsCtl.IsActive);
             string key = Navigation.Press(code, anyActive, Efl.ecore_time_get());
             if (key != null)
@@ -685,10 +746,18 @@ namespace Launcher
             }
         }
 
+        private static AppEntry[] CurrentPageEntries()
+        {
+            if (_ctl == _allCtl) return _allApps;
+            if (_ctl == _inputsCtl) return _inputs;
+            return _apps;
+        }
+
         private static void HandleKey(string key)
         {
             try
             {
+                if (_dockMapped) OverlayFlag.Mark(OverlayFlag.DockPath, true);
                 int index;
                 switch (_ctl.Key(key, out index))
                 {
@@ -699,12 +768,16 @@ namespace Launcher
                         ResetIdle();
                         break;
                     case KeyAction.Launch:
-                        Activate((_ctl == _appsCtl ? _apps : _inputs)[index]);
+                        AppEntry[] list = CurrentPageEntries();
+                        if (index >= 0 && index < list.Length) Activate(list[index]);
                         break;
                     case KeyAction.OpenPanel:
-                        OpenInputs();
+                        AppEntry[] pList = CurrentPageEntries();
+                        if (index >= 0 && index < pList.Length && pList[index].Panel == "allapps") OpenAllApps();
+                        else OpenInputs();
                         break;
                     case KeyAction.Back:
+                        SoundPlayer.Play(SoundEffect.Move);
                         SelectPage(_appsCtl, _appsDock);
                         break;
                     case KeyAction.Hide:
@@ -751,6 +824,15 @@ namespace Launcher
                             case Command.Show: _perfWhy = "fifo-show"; ShowDock(); break;
                             case Command.Hide: _perfWhy = "fifo-hide"; HideDock(); break;
                             case Command.Toggle: _perfWhy = "fifo-toggle"; if (_ctl.IsActive) HideDock(); else ShowDock(); break;
+                            case Command.VolUp:
+                            case Command.VolDown:
+                            case Command.VolMute:
+                                _lastFifoVolumeAt = Efl.ecore_time_get();
+                                VolumeKey(c, fromFifo: true);
+                                break;
+                            case Command.Rescan:
+                                if (_input != null) _input.Rescan();
+                                break;
                         }
                     }
                 }
@@ -759,10 +841,217 @@ namespace Launcher
             return 1;
         }
 
+        // ------------------------------------------------------------------ Volume bar & Home claim
+
+        private const string VolumeAppIdKey = "db/volume/appid";
+        private const string SamsungVolumeAppId = "org.tizen.tv-viewer";
+        private const string SuppressedVolumeAppId = "org.vetro.noop";
+
+        private static void ConfigureVolumeOsdSuppression()
+        {
+            try
+            {
+                IntPtr ptr = Efl.vconf_get_str(VolumeAppIdKey);
+                string cur = ptr == IntPtr.Zero ? null : Marshal.PtrToStringAnsi(ptr);
+                bool suppress = _volumeEdge != VolumeEdge.Hidden;
+                string want = suppress ? SuppressedVolumeAppId : SamsungVolumeAppId;
+                if (string.Equals(cur, want, StringComparison.Ordinal))
+                {
+                    Logger.Write("volume: CEC OSD appid already " + want);
+                    return;
+                }
+                if (!suppress && !string.Equals(cur, SuppressedVolumeAppId, StringComparison.Ordinal))
+                    return;
+                ThreadPool.QueueUserWorkItem(_ =>
+                {
+                    try
+                    {
+                        int rc = Libc.system("/usr/bin/vconftool set -f -t string " + VolumeAppIdKey + " " + want
+                            + " >/dev/null 2>&1 && /bin/systemctl restart hdmicec-service >/dev/null 2>&1");
+                        Logger.Write("volume: CEC OSD appid " + (cur ?? "(null)") + " -> " + want + " rc=" + rc);
+                    }
+                    catch (Exception ex) { Logger.Write("volume: CEC OSD config error: " + ex.Message); }
+                });
+            }
+            catch (Exception ex) { Logger.Write("volume: CEC OSD check unavailable (" + ex.GetType().Name + ")"); }
+        }
+
+        private static bool SamsungMuted()
+        {
+            int v;
+            return Efl.vconf_get_int("memory/org.tizen.tv-viewer/mute_status", out v) == 0 && v != 0;
+        }
+
+        private static void VolumeKey(Command key, bool fromFifo)
+        {
+            try
+            {
+                int output;
+                bool known = Sound.TryGetSpeakerSelection(out output);
+                bool external = known && Sound.IsExternalOutput(output);
+
+                if (external)
+                {
+                    if (Sonos.IsAvailable)
+                    {
+                        double now = Efl.ecore_time_get();
+                        if (now - _lastSonosReadAt > 2.5 || _trackedVolume < 0)
+                        {
+                            int realVol;
+                            if (Sonos.TryGetVolume(out realVol)) _trackedVolume = realVol;
+                            else if (_trackedVolume < 0) _trackedVolume = 20;
+                            bool realMute;
+                            if (Sonos.TryGetMute(out realMute)) _virtualMuted = realMute;
+                        }
+                        _lastSonosReadAt = now;
+
+                        if (key == Command.VolMute)
+                        {
+                            _virtualMuted = !_virtualMuted;
+                            Sonos.SetMuteAsync(_virtualMuted);
+                        }
+                        else
+                        {
+                            if (_virtualMuted)
+                            {
+                                _virtualMuted = false;
+                                Sonos.SetMuteAsync(false);
+                            }
+                            _trackedVolume = VolumeModel.Next(_trackedVolume, key == Command.VolUp ? 1 : -1, 1);
+                            Sonos.SetVolumeAsync(_trackedVolume);
+                        }
+
+                        if (_volumeEdge == VolumeEdge.Hidden) return;
+                        if (_pill == null) _pill = new VolumePill(_resDir, Logger.Write, _screenW, _screenH, _volumeEdge);
+                        _pill.Show(_trackedVolume, _virtualMuted);
+                        return;
+                    }
+
+                    if (fromFifo)
+                    {
+                        string native = key == Command.VolUp ? "XF86AudioRaiseVolume" : (key == Command.VolDown ? "XF86AudioLowerVolume" : "XF86AudioMute");
+                        int rc = Libc.system("/usr/bin/input_keyevent " + native + " >/dev/null 2>&1 &");
+                        Logger.Write("volume: sound on output " + output + ", key passed to Samsung in the background rc=" + rc);
+                    }
+                    return;
+                }
+
+                int tvVolume;
+                bool hasTvVol = Sound.TryGetVolume(out tvVolume);
+                if (_trackedVolume < 0) _trackedVolume = hasTvVol && tvVolume > 0 ? tvVolume : 20;
+
+                int volume = external ? _trackedVolume : (hasTvVol ? tvVolume : _trackedVolume);
+                bool muted = external ? _virtualMuted : SamsungMuted();
+
+                if (!external && muted)
+                {
+                    Libc.system("/usr/bin/input_keyevent XF86AudioMute >/dev/null 2>&1 &");
+                    muted = false;
+                }
+
+                int target = volume;
+                if (key == Command.VolMute)
+                {
+                    if (external)
+                    {
+                        _virtualMuted = !_virtualMuted;
+                        if (_virtualMuted) { _levelBeforeMute = volume > 0 ? volume : 20; target = 0; }
+                        else target = _levelBeforeMute > 0 ? _levelBeforeMute : 20;
+                    }
+                    else
+                    {
+                        if (volume > 0) { _levelBeforeMute = volume; target = 0; }
+                        else target = _levelBeforeMute > 0 ? _levelBeforeMute : 10;
+                    }
+                }
+                else
+                {
+                    _virtualMuted = false;
+                    int from = volume == 0 && _levelBeforeMute > 0 ? _levelBeforeMute : volume;
+                    target = VolumeModel.Next(from, key == Command.VolUp ? 1 : -1, 1);
+                    _levelBeforeMute = 0;
+                }
+
+                _trackedVolume = target;
+                if (!external && target != volume)
+                {
+                    if (Sound.TrySetVolume(target)) volume = target;
+                    else Logger.Write("volume: level change refused");
+                }
+                else
+                {
+                    volume = target;
+                }
+
+                if (_volumeEdge == VolumeEdge.Hidden) return;
+                if (_pill == null) _pill = new VolumePill(_resDir, Logger.Write, _screenW, _screenH, _volumeEdge);
+                bool showMuted = (external && _virtualMuted) || (volume == 0 && _levelBeforeMute > 0);
+                _pill.Show(volume, showMuted);
+            }
+            catch (Exception ex) { Logger.Write("volume: " + ex.Message); }
+        }
+
+        private static void TryClaimHome()
+        {
+            if (!_claimHome || _claimTried || _homeLaunch != null || _input == null || !_input.HasOpenNodes) return;
+            _claimTried = true;
+            try
+            {
+                _homeClaimed = Efl.elm_win_keygrab_set(_win, "XF86Home", 0, 0, 0, KeygrabExclusive);
+                Logger.Write("home: claim " + (_homeClaimed ? "granted" : "refused"));
+            }
+            catch (Exception ex) { Logger.Write("home: claim unavailable (" + ex.GetType().Name + ")"); }
+            if (_homeClaimed) WatchEcoreKeys();
+            try
+            {
+                if (_claimPath != null)
+                {
+                    if (_homeClaimed) File.WriteAllText(_claimPath, Libc.getpid().ToString(CultureInfo.InvariantCulture));
+                    else Libc.unlink(_claimPath);
+                }
+            }
+            catch (Exception ex) { Logger.Write("home claim file: " + ex.Message); }
+        }
+
+        private static void WatchEcoreKeys()
+        {
+            try
+            {
+                IntPtr lib = NativeLibrary.Load("libecore_input.so.1");
+                int code = Marshal.ReadInt32(NativeLibrary.GetExport(lib, "ECORE_EVENT_KEY_DOWN"));
+                bool ok = Efl.ecore_event_handler_add(code, EcoreKeyCb, IntPtr.Zero) != IntPtr.Zero;
+                Logger.Write("home: window keys " + (ok ? "on" : "refused"));
+            }
+            catch (Exception ex) { Logger.Write("home: window keys unavailable (" + ex.GetType().Name + ")"); }
+        }
+
+        private static byte OnEcoreKey(IntPtr data, int type, IntPtr ev)
+        {
+            try
+            {
+                string key = ev == IntPtr.Zero ? null : Marshal.PtrToStringAnsi(Marshal.ReadIntPtr(ev));
+                bool anyActive = _ctl.IsActive || (_settingsCtl != null && _settingsCtl.IsActive);
+                if (key == "XF86Home" && !anyActive)
+                {
+                    double now = Efl.ecore_time_get();
+                    if (now - _input.LastRawHome >= HomeEchoSeconds && now - _input.LastHome >= InputWatcher.HomeDebounceSeconds)
+                    {
+                        _input.LastHome = now;
+                        Logger.Write("home: claimed press from the window");
+                        ShowDock();
+                        LauncherSvc.ArmGuard();
+                    }
+                }
+            }
+            catch (Exception ex) { Logger.Write("ecore key: " + ex.Message); }
+            return 1;
+        }
+
         private static void HandleSettingsKey(string key)
         {
             try
             {
+                if (_dockMapped) OverlayFlag.Mark(OverlayFlag.DockPath, true);
                 SettingsKeyResult res = _settingsCtl.Key(key);
                 switch (res.Action)
                 {
@@ -778,6 +1067,7 @@ namespace Launcher
                         SoundPlayer.SetEnabled(_effectiveSettings.EffectiveSoundEnabled);
                         SoundPlayer.Play(SoundEffect.Move);
                         _appsDock.InvalidateChrome();
+                        if (_allDock != null) _allDock.InvalidateChrome();
                         _inputsDock.InvalidateChrome();
                         StartClock();
                         _dock.Apply(_ctl);
@@ -801,7 +1091,7 @@ namespace Launcher
                         break;
                     case SettingsActionKind.LaunchApps:
                         CloseSettings(playSound: false);
-                        LaunchDirect(_samsungAppsEntry);
+                        OpenAllApps();
                         break;
                     case SettingsActionKind.LaunchVetro:
                         CloseSettings(playSound: false);
@@ -889,6 +1179,7 @@ namespace Launcher
                 {
                     _weatherTask = null;
                     _appsDock.InvalidateChrome();
+                    if (_allDock != null) _allDock.InvalidateChrome();
                     _inputsDock.InvalidateChrome();
                     if (_ctl != null && _ctl.IsActive && _dock != null) _dock.Apply(_ctl);
                 }
@@ -906,7 +1197,9 @@ namespace Launcher
         {
             if (e.Panel != null)
             {
-                if (e.Panel == "inputs") OpenInputs(); else Logger.Write("unknown panel " + e.Panel);
+                if (e.Panel == "allapps") OpenAllApps();
+                else if (e.Panel == "inputs") OpenInputs();
+                else Logger.Write("unknown panel " + e.Panel);
                 return;
             }
             if (e.Slug == "settings")
@@ -931,8 +1224,8 @@ namespace Launcher
         private static void WarmUp()
         {
             long t0 = Stopwatch.GetTimestamp();
-            Controller[] ctls = { _appsCtl, _inputsCtl };
-            Dock[] docks = { _appsDock, _inputsDock };
+            Controller[] ctls = _allCtl != null ? new[] { _appsCtl, _allCtl, _inputsCtl } : new[] { _appsCtl, _inputsCtl };
+            Dock[] docks = _allDock != null ? new[] { _appsDock, _allDock, _inputsDock } : new[] { _appsDock, _inputsDock };
             for (int p = 0; p < ctls.Length; p++)
             {
                 Controller c = ctls[p]; Dock d = docks[p];
@@ -978,6 +1271,13 @@ namespace Launcher
             _dir = ResolveDir(args);
             _pidPath = Path.Combine(_dir, "tvlauncher.pid");
             _fifoPath = Path.Combine(_dir, "tvlauncher.fifo");
+            _claimPath = Path.Combine(_dir, "tvlauncher.homeclaim");
+            _claimHome = Flag(args, "--claim-home");
+            _volumeEdge = VolumePlacement.ParseEdge(Arg(args, "--volume-edge"));
+            int port;
+            if (int.TryParse(Arg(args, "--service-port"), out port) && port >= 1024 && port <= 65535)
+                LauncherSvc.ServicePort = port;
+            OverlayFlag.Pid = Libc.getpid().ToString(CultureInfo.InvariantCulture);
             Logger.Init(Path.Combine(_dir, "tvlauncher.log"));
 
             if (!AcquireInstance()) return 0;
@@ -989,6 +1289,7 @@ namespace Launcher
                 Logger.Write("start pid=" + Libc.getpid() + " uid=" + Libc.getuid() + " engine=" + engine);
 
                 string res = Path.Combine(AppContext.BaseDirectory, "res");
+                _resDir = res;
 
                 Efl.elm_init(0, IntPtr.Zero);
                 _win = Efl.elm_win_add(IntPtr.Zero, "tvlauncher", Efl.ElmWinNotification);
@@ -1004,21 +1305,28 @@ namespace Launcher
                     int fw, fh;
                     if (wh.Length == 2 && int.TryParse(wh[0], out fw) && int.TryParse(wh[1], out fh)) { screenW = fw; screenH = fh; }
                 }
+                _screenW = screenW;
+                _screenH = screenH;
                 Logger.Write("screen reported " + sw + "x" + sh + ", layout " + screenW + "x" + screenH);
 
                 Weather.Init(_dir);
                 SetupLocalization(args);
+                Sonos.StartDiscovery();
+                ConfigureVolumeOsdSuppression();
                 SoundPlayer.Init(Path.Combine(res, "sounds"), Logger.Write, Flag(args, "--no-sound"), _effectiveSettings.EffectiveSoundEnabled);
 
                 AppEntry[] rawApps;
                 _apps = LoadApps(Arg(args, "--apps") ?? Path.Combine(res, "apps.tsv"), out rawApps);
+                _allApps = LoadAllApps(Arg(args, "--all-apps") ?? Path.Combine(Weather.CacheDir, "vetro-dock-allapps.tsv"), rawApps);
                 _inputs = LoadList(Arg(args, "--inputs") ?? Path.Combine(res, "inputs.tsv"), Catalog.BuiltInInputs);
                 ConfigureShortcuts(rawApps);
                 int leftPins = Catalog.LeftPinCount(_apps);
                 int group = Catalog.GroupStart(_apps);
                 var layout = new DockLayout(_apps.Length, screenW, screenH, 0, false, group, leftPins, true);
+                var allLayout = new DockLayout(_allApps.Length, screenW, screenH, layout.WinW, false, Catalog.GroupStart(_allApps), 0, false);
                 var inputsLayout = new DockLayout(_inputs.Length, screenW, screenH, layout.WinW, true, -1);
                 _appsCtl = new Controller(layout) { PanelEnabled = false };
+                _allCtl = new Controller(allLayout, PageKind.Panel) { PanelEnabled = false };
                 _inputsCtl = new Controller(inputsLayout, PageKind.Panel);
                 _ctl = _appsCtl;
 
@@ -1040,14 +1348,18 @@ namespace Launcher
                 try { Weather.Refresh(); } catch (Exception ex) { Logger.Write("weather refresh: " + ex.Message); }
                 Logger.Write("weather " + (Weather.Text ?? "none") + (Weather.LastError != null ? " (" + Weather.LastError + ")" : ""));
 
-                _appsDock = new Dock(_win, layout, _apps, res, Logger.Write, Design.HintText, true);
+                _appsDock = new Dock(_win, layout, _apps, res, Logger.Write, Design.HintText, true, true);
                 _appsDock.Build();
-                _inputsDock = new Dock(_win, inputsLayout, _inputs, res, Logger.Write, "Back", false);
+                _allDock = new Dock(_win, allLayout, _allApps, res, Logger.Write, Design.HintText, false, false);
+                _allDock.Build();
+                _allDock.SetVisible(false);
+                _inputsDock = new Dock(_win, inputsLayout, _inputs, res, Logger.Write, "Back", false, false);
                 _inputsDock.Build();
                 _inputsDock.SetVisible(false);
                 _dock = _appsDock;
                 if (!Flag(args, "--no-warmup")) WarmUp();
                 _appsDock.Apply(_appsCtl);
+                _allDock.Apply(_allCtl);
                 _inputsDock.Apply(_inputsCtl);
 
                 _settingsCtl = new SettingsController(_fileSettings, _inputs);
@@ -1056,8 +1368,8 @@ namespace Launcher
                 if (_settingsModal.Win != IntPtr.Zero)
                     Efl.evas_object_event_callback_add(_settingsModal.Win, Efl.EvasCallbackKeyDown, KeyCb, IntPtr.Zero);
 
-                Logger.Write("engine in use: " + (Efl.EngineName(_dock.Evas) ?? "unknown") + ", " + _apps.Length + " apps, " + _inputs.Length + " inputs, "
-                    + (_appsDock.MissingIcons + _inputsDock.MissingIcons) + " icons missing");
+                Logger.Write("engine in use: " + (Efl.EngineName(_dock.Evas) ?? "unknown") + ", " + _apps.Length + " apps, " + _allApps.Length + " all-apps, " + _inputs.Length + " inputs, "
+                    + (_appsDock.MissingIcons + _allDock.MissingIcons + _inputsDock.MissingIcons) + " icons missing");
 
                 Efl.evas_object_event_callback_add(_win, Efl.EvasCallbackKeyDown, KeyCb, IntPtr.Zero);
                 SetupFifo();
