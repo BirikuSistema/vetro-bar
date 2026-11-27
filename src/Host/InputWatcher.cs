@@ -26,6 +26,7 @@ namespace Launcher.Host
         private readonly HashSet<string> _openFailed = new HashSet<string>();
         private readonly byte[] _buf = new byte[16 * 32];
         private readonly List<int> _presses = new List<int>();
+        private readonly List<int> _releases = new List<int>();
 
         private readonly Efl.FdCb _inputCb;
         private readonly Efl.FdCb _inotifyCb;
@@ -34,6 +35,7 @@ namespace Launcher.Host
         private readonly Action _onHome;
         private readonly Action _onHomeBurst;
         private readonly Action<int> _onNav;
+        private readonly Action<int> _onRelease;
 
         private int _inotifyFd = -1;
         private IntPtr _inotifyHandler;
@@ -54,11 +56,12 @@ namespace Launcher.Host
             catch (Exception ex) { Logger.Write("input: rescan: " + ex.Message); }
         }
 
-        public InputWatcher(Action onHome, Action onHomeBurst, Action<int> onNav)
+        public InputWatcher(Action onHome, Action onHomeBurst, Action<int> onNav, Action<int> onRelease = null)
         {
             _onHome = onHome;
             _onHomeBurst = onHomeBurst;
             _onNav = onNav;
+            _onRelease = onRelease;
             _inputCb = OnInput;
             _inotifyCb = OnInotify;
             _rescanCb = OnRescan;
@@ -179,7 +182,8 @@ namespace Launcher.Host
                     if (n < 0 && Marshal.GetLastWin32Error() != EAgain) { DropNode(index); break; }
                     if (n <= 0) break;
                     _presses.Clear();
-                    _readers[index].Feed(_buf, (int)n, _presses);
+                    _releases.Clear();
+                    _readers[index].Feed(_buf, (int)n, _presses, _releases);
                     for (int k = 0; k < _presses.Count; k++)
                     {
                         int code = _presses[k];
@@ -200,6 +204,10 @@ namespace Launcher.Host
                             continue;
                         }
                         _onHome();
+                    }
+                    if (_onRelease != null)
+                    {
+                        for (int k = 0; k < _releases.Count; k++) _onRelease(_releases[k]);
                     }
                 }
             }

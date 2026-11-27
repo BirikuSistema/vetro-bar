@@ -31,6 +31,8 @@ namespace Launcher.Host
         private volatile string _ip;
         private int _wantVolume = -1;
         private int _wantMute = -1;   // -1 none, 0 unmute, 1 mute
+        private int _wantNight = -1;  // -1 none, 0 off, 1 on
+        private int _wantVoice = -1;  // -1 none, 0 off, 1 on
         private bool _workerRunning;
 
         public bool IsAvailable { get { return !string.IsNullOrEmpty(_ip); } }
@@ -219,6 +221,21 @@ namespace Launcher.Host
             return true;
         }
 
+        public bool TryGetNightMode(out bool enabled) { return TryGetEq("NightMode", out enabled); }
+
+        public bool TryGetDialogLevel(out bool enabled) { return TryGetEq("DialogLevel", out enabled); }
+
+        private bool TryGetEq(string eqType, out bool enabled)
+        {
+            enabled = false;
+            string xml;
+            if (!SendSoap("GetEQ", "<InstanceID>0</InstanceID><EQType>" + eqType + "</EQType>", 800, out xml)) return false;
+            string vText = ExtractTag(xml, "CurrentValue");
+            if (vText == null) return false;
+            enabled = vText.Trim() == "1" || string.Equals(vText.Trim(), "true", StringComparison.OrdinalIgnoreCase);
+            return true;
+        }
+
         public void SetVolumeAsync(int volume)
         {
             int clamped = Math.Max(0, Math.Min(100, volume));
@@ -238,6 +255,24 @@ namespace Launcher.Host
             }
         }
 
+        public void SetNightModeAsync(bool enabled)
+        {
+            lock (_writeLock)
+            {
+                _wantNight = enabled ? 1 : 0;
+                EnsureWorkerLocked();
+            }
+        }
+
+        public void SetDialogLevelAsync(bool enabled)
+        {
+            lock (_writeLock)
+            {
+                _wantVoice = enabled ? 1 : 0;
+                EnsureWorkerLocked();
+            }
+        }
+
         private void EnsureWorkerLocked()
         {
             if (_workerRunning) return;
@@ -249,14 +284,18 @@ namespace Launcher.Host
         {
             while (true)
             {
-                int vol, mute;
+                int vol, mute, night, voice;
                 lock (_writeLock)
                 {
                     mute = _wantMute;
                     _wantMute = -1;
                     vol = _wantVolume;
                     _wantVolume = -1;
-                    if (mute < 0 && vol < 0)
+                    night = _wantNight;
+                    _wantNight = -1;
+                    voice = _wantVoice;
+                    _wantVoice = -1;
+                    if (mute < 0 && vol < 0 && night < 0 && voice < 0)
                     {
                         _workerRunning = false;
                         return;
@@ -273,6 +312,14 @@ namespace Launcher.Host
                     if (vol >= 0)
                     {
                         SendSoap("SetVolume", "<InstanceID>0</InstanceID><Channel>Master</Channel><DesiredVolume>" + vol.ToString(CultureInfo.InvariantCulture) + "</DesiredVolume>", 1200, out unused);
+                    }
+                    if (night >= 0)
+                    {
+                        SendSoap("SetEQ", "<InstanceID>0</InstanceID><EQType>NightMode</EQType><DesiredValue>" + night + "</DesiredValue>", 1200, out unused);
+                    }
+                    if (voice >= 0)
+                    {
+                        SendSoap("SetEQ", "<InstanceID>0</InstanceID><EQType>DialogLevel</EQType><DesiredValue>" + voice + "</DesiredValue>", 1200, out unused);
                     }
                 }
                 catch (Exception ex) { Logger.Write("sonos: write: " + ex.Message); }

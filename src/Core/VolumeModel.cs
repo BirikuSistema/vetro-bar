@@ -28,12 +28,14 @@ namespace Launcher.Core
 
     internal static class VolumeFade
     {
+        public static bool Instant { get; set; }
         public const double FadeInSeconds = 0.14;
         public const double HoldSeconds = 1.60;
         public const double FadeOutSeconds = 0.24;
 
         public static double Alpha(double now, double shownAt, double until)
         {
+            if (Instant) return now > until ? 0.0 : 1.0;
             if (now < shownAt) return 0;
             if (now - shownAt < FadeInSeconds) return (now - shownAt) / FadeInSeconds;
             if (now <= until) return 1.0;

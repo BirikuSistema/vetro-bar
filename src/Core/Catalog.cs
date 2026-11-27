@@ -302,32 +302,52 @@ namespace Launcher.Core
         }
 
         /// <summary>
-        /// Overlay order for the All Apps bar: all installed apps (with Live TV mapped to TDT/source:0),
+        /// Overlay order for the All Apps bar: only installed apps that do NOT appear on the main bar,
         /// followed by Settings (opens our Settings Modal) and TV-Store stacked at the right.
         /// </summary>
-        public static AppEntry[] ArrangeAllApps(AppEntry[] rawAll, AppEntry[] fallbackApps = null)
+        public static AppEntry[] ArrangeAllApps(AppEntry[] rawAll, AppEntry[] mainBarApps = null)
         {
-            AppEntry[] source = (rawAll != null && rawAll.Length > 0) ? rawAll : (fallbackApps ?? new AppEntry[0]);
+            var mainSlugs = new HashSet<string>(StringComparer.Ordinal);
+            var mainAppIds = new HashSet<string>(StringComparer.Ordinal);
+            var mainRowKeys = new HashSet<string>(StringComparer.Ordinal);
+            bool mainHasTv = false;
+            if (mainBarApps != null)
+            {
+                foreach (AppEntry m in mainBarApps)
+                {
+                    if (m == null) continue;
+                    if (m.Slug == "allapps" || m.Panel != null || m.Slug == "samsunghome" || m.Slug == "settings") continue;
+                    if (IsTv(m)) { mainHasTv = true; continue; }
+                    if (!string.IsNullOrEmpty(m.Slug)) mainSlugs.Add(m.Slug);
+                    if (!string.IsNullOrEmpty(m.AppId)) mainAppIds.Add(m.AppId);
+                    if (!string.IsNullOrEmpty(m.RowKey)) mainRowKeys.Add(m.RowKey);
+                }
+            }
+
+            AppEntry[] source = rawAll ?? new AppEntry[0];
             AppEntry settings = null, store = null;
             var apps = new List<AppEntry>();
-            var seen = new HashSet<string>();
+            var seen = new HashSet<string>(StringComparer.Ordinal);
             foreach (AppEntry e in source)
             {
                 if (e == null) continue;
                 if (e.Slug == "allapps" || e.Panel != null || e.Slug == "samsunghome") continue;
                 if (IsHdmi(e)) continue;
                 if (e.Slug == "settings") { settings = e; continue; }
-                if (e.Slug == "tvstore" || e.Slug == "store")
+                if (e.Slug == "tvstore" || e.Slug == "store" || e.AppId == "A2STVStore.Store")
                 {
                     store = new AppEntry("tvstore", "TV-Store", e.AppId ?? "A2STVStore.Store", e.FallbackAppId ?? "com.samsung.tv.store", null, -1, null, true);
                     continue;
                 }
                 if (IsTv(e))
                 {
-                    if (seen.Add("livetv"))
+                    if (!mainHasTv && seen.Add("livetv"))
                         apps.Add(new AppEntry("livetv", e.Label == "Live TV" ? "TV" : e.Label, Design.TdtAppId, null, null, 0, null, false, null, null, false, e.RowKey));
                     continue;
                 }
+                if (mainSlugs.Contains(e.Slug)) continue;
+                if (!string.IsNullOrEmpty(e.AppId) && mainAppIds.Contains(e.AppId)) continue;
+                if (!string.IsNullOrEmpty(e.RowKey) && mainRowKeys.Contains(e.RowKey)) continue;
                 if (seen.Add(e.Slug)) apps.Add(e);
             }
             if (settings == null)

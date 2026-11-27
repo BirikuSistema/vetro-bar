@@ -476,22 +476,16 @@ namespace Launcher.Core
 
         private SettingsKeyResult CycleUnits(int dir)
         {
-            char[] order = { '\0', 'c', 'f' };
-            int idx = Array.IndexOf(order, _settings.Units);
-            if (idx < 0) idx = 0;
-            idx = (idx + dir + order.Length) % order.Length;
-            _settings.Units = order[idx];
+            bool isFahrenheit = _settings.Units == 'f' || (_settings.Units == '\0' && Localization.Fahrenheit);
+            _settings.Units = isFahrenheit ? 'c' : 'f';
             RebuildMainRows(SettingsItemId.Units);
             return new SettingsKeyResult { Action = SettingsActionKind.Changed, NeedsWeatherRefresh = true };
         }
 
         private SettingsKeyResult CycleClockFormat(int dir)
         {
-            int[] order = { 0, 24, 12 };
-            int idx = Array.IndexOf(order, _settings.Clock);
-            if (idx < 0) idx = 0;
-            idx = (idx + dir + order.Length) % order.Length;
-            _settings.Clock = order[idx];
+            bool is12h = _settings.Clock == 12 || (_settings.Clock == 0 && Localization.Is12Hour);
+            _settings.Clock = is12h ? 24 : 12;
             RebuildMainRows(SettingsItemId.ClockFormat);
             return SettingsKeyResult.Of(SettingsActionKind.Changed);
         }
@@ -720,12 +714,14 @@ namespace Launcher.Core
             }
             _rows.Add(new SettingsRow(SettingsItemId.WeatherShowLocation, SettingsItemKind.Toggle, "map-pin", Localization.Ui("item.weather_show_location"), "", wOn, false, _settings.EffectiveWeatherShowLocation));
             _rows.Add(new SettingsRow(SettingsItemId.WeatherShowMinMax, SettingsItemKind.Toggle, "arrows-down-up", Localization.Ui("item.weather_show_minmax"), "", wOn, false, _settings.EffectiveWeatherShowMinMax));
-            string unitVal = _settings.Units == 'c' ? "\u00b0C" : (_settings.Units == 'f' ? "\u00b0F" : Localization.Ui("val.auto"));
+            bool isFahrenheit = _settings.Units == 'f' || (_settings.Units == '\0' && Localization.Fahrenheit);
+            string unitVal = isFahrenheit ? "\u00b0F" : "\u00b0C";
             _rows.Add(new SettingsRow(SettingsItemId.Units, SettingsItemKind.Cycle, "thermometer", Localization.Ui("item.units"), unitVal, wOn));
 
             _rows.Add(new SettingsRow(SettingsItemId.None, SettingsItemKind.Header, null, Localization.Ui("sec.clock"), "", false));
             _rows.Add(new SettingsRow(SettingsItemId.ShowClock, SettingsItemKind.Toggle, "clock", Localization.Ui("item.show_clock"), "", true, false, cOn));
-            string clockVal = _settings.Clock == 12 ? Localization.Ui("val.12h") : (_settings.Clock == 24 ? Localization.Ui("val.24h") : Localization.Ui("val.auto"));
+            bool is12h = _settings.Clock == 12 || (_settings.Clock == 0 && Localization.Is12Hour);
+            string clockVal = Localization.Ui(is12h ? "val.12h" : "val.24h");
             _rows.Add(new SettingsRow(SettingsItemId.ClockFormat, SettingsItemKind.Cycle, "timer", Localization.Ui("item.clock_format"), clockVal, cOn));
             _rows.Add(new SettingsRow(SettingsItemId.ShowDate, SettingsItemKind.Toggle, "calendar", Localization.Ui("item.show_date"), "", cOn, false, _settings.EffectiveShowDate));
             _rows.Add(new SettingsRow(SettingsItemId.DateFormat, SettingsItemKind.Cycle, "calendar-dots", Localization.Ui("item.date_format"), DateFormatLabel(_settings.EffectiveDateFormat), dOn));

@@ -37,9 +37,11 @@ namespace Launcher.Core
             return presses;
         }
 
-        /// <summary>Allocation-free variant: appends the presses to a list the caller reuses.</summary>
-        public void Feed(byte[] data, int count, List<int> presses)
+        public void Feed(byte[] data, int count, List<int> presses) { Feed(data, count, presses, null); }
+
+        public void Feed(byte[] data, int count, List<int> presses, List<int> releases)
         {
+            if (data == null || count <= 0) return;
             int i = 0;
             while (i < count)
             {
@@ -51,16 +53,17 @@ namespace Launcher.Core
                 i += take;
                 if (_carried < _record) break;
                 _carried = 0;
-                Decode(_carry, presses);
+                Decode(_carry, presses, releases);
             }
         }
 
-        private void Decode(byte[] rec, List<int> into)
+        private void Decode(byte[] rec, List<int> into, List<int> releases)
         {
             int type = rec[_typeOffset] | (rec[_typeOffset + 1] << 8);
             int code = rec[_typeOffset + 2] | (rec[_typeOffset + 3] << 8);
             int value = rec[_typeOffset + 4] | (rec[_typeOffset + 5] << 8) | (rec[_typeOffset + 6] << 16) | (rec[_typeOffset + 7] << 24);
             if (type == EvKey && value == 1) into.Add(code);
+            else if (type == EvKey && value == 0 && releases != null) releases.Add(code);
         }
     }
 
@@ -69,7 +72,7 @@ namespace Launcher.Core
     {
         // Vetro's filter takes the real remote exclusively (EVIOCGRAB) and re-emits the keys it lets through on its own
         // node under the real remote's name, so these keywords match that node too while the physical one goes silent.
-        private static readonly string[] Remote = { "smart control", "rc device", "mcirb" };
+        private static readonly string[] Remote = { "smart control", "rc device", "mcirb", "vetro-forwarded-remote" };
         private static readonly string[] Excluded = { "keyboard", "mouse", "panel" };
 
         private static bool Any(string lower, string[] words)

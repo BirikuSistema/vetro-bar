@@ -1,5 +1,6 @@
 using System;
 using System.IO;
+using System.Runtime.InteropServices;
 using Launcher.Core;
 using Launcher.Native;
 
@@ -8,36 +9,44 @@ namespace Launcher.Ui
     /// <summary>
     /// Soft borderless glass volume pill anchored to the chosen screen edge, matching vetro-bar's
     /// dock_bg.png (#003049 @ 70% opacity, 24 px corners), SamsungOneUI 700 font, and smooth slide-in/out.
+    /// When Sonos is active, displays a discreet secondary capsule below the pill with Night Mode and
+    /// Speech Enhancement icons and subtle Left/Right hints.
     /// </summary>
     internal sealed class VolumePill
     {
         private const string Font = Design.SideChromeFont;
         private const int NotificationLevelTop = 40, WindowLayer = 900;
         private const int SlidePad = 48;
-        private const double HoldSeconds = VolumeFade.HoldSeconds, FadeInSeconds = VolumeFade.FadeInSeconds;
+        private const double FadeInSeconds = VolumeFade.FadeInSeconds;
+        private const double ModesHoldSeconds = 2.4;
 
         private readonly string _assets;
         private readonly Action<string> _log;
         private readonly VolumeEdge _edge;
         private readonly VolumePlacement _p;
+        private readonly Action<string> _onModeKey;
+        private readonly NavigationInput _nav = new NavigationInput();
         private readonly int _winX, _winY, _winW, _winH;
 
         private IntPtr _win, _body, _track, _fill, _clip, _num;
+        private IntPtr _modesBg, _caretLeft, _nightBadge, _nightIcon, _voiceBadge, _voiceIcon, _caretRight;
         private readonly IntPtr[] _icons = new IntPtr[3];
         private IntPtr _animator, _holdTimer;
         private readonly Efl.TaskCb _tick, _holdEnd;
-        private bool _built, _failed, _shown, _muted;
+        private readonly Efl.EvasCb _keyCb;
+        private bool _built, _failed, _shown, _muted, _showModes, _nightOn, _voiceOn, _grabbed;
         private double _shownAt, _until;
         private int _fillLength, _iconLevel = -1;
         private int _numBaseX, _numBaseY;
         private int _clipBaseX, _clipBaseY, _clipW, _clipH;
         private int _lastShiftX = int.MinValue, _lastShiftY = int.MinValue;
 
-        public VolumePill(string assets, Action<string> log, int screenW, int screenH, VolumeEdge edge)
+        public VolumePill(string assets, Action<string> log, int screenW, int screenH, VolumeEdge edge, Action<string> onModeKey = null)
         {
             _assets = assets;
             _log = log;
             _edge = edge;
+            _onModeKey = onModeKey;
             _p = VolumePlacement.For(edge, screenW, screenH);
             _winX = Math.Max(0, _p.WinX - SlidePad);
             _winY = Math.Max(0, _p.WinY - SlidePad);
@@ -45,16 +54,28 @@ namespace Launcher.Ui
             _winH = Math.Min(screenH - _winY, _p.WinH + 2 * SlidePad);
             _tick = Tick;
             _holdEnd = OnHoldEnd;
+            _keyCb = OnKey;
         }
 
         public bool IsOnScreen { get { return _shown; } }
+        public bool HasSonosModes { get { return _showModes; } }
 
         public void Show(int volume, bool muted, string customLabel = null)
         {
+            Show(volume, muted, false, false, false, false, customLabel);
+        }
+
+        public void Show(int volume, bool muted, bool showModes, bool nightOn, bool voiceOn, bool allowKeyGrab, string customLabel = null)
+        {
             if (!Build()) return;
+            _showModes = showModes;
+            _nightOn = nightOn;
+            _voiceOn = voiceOn;
+            SetModesVisible(showModes);
             Update(volume, muted, customLabel);
+
             double now = Efl.ecore_time_get();
-            _until = now + HoldSeconds;
+            _until = now + (showModes ? ModesHoldSeconds : VolumeFade.HoldSeconds);
             if (!_shown)
             {
                 _shown = true;
@@ -65,9 +86,66 @@ namespace Launcher.Ui
                 Efl.evas_object_show(_win);
             }
             else if (now - _shownAt < FadeInSeconds + 0.01) { }
-            else _shownAt = now - FadeInSeconds;
+            else
+            {
+                _shownAt = now - FadeInSeconds;
+                Apply(1.0);
+            }
+            Efl.elm_win_raise(_win);
+            if (showModes && allowKeyGrab) GrabModeKeys();
+            else UngrabModeKeys();
+
             CancelHold();
             if (_animator == IntPtr.Zero) _animator = Efl.ecore_animator_add(_tick, IntPtr.Zero);
+        }
+
+        public void ReleaseModeKeys()
+        {
+            UngrabModeKeys();
+        }
+
+        public void HandleRawModeKey(int code)
+        {
+            if (!_shown || !_showModes || _onModeKey == null) return;
+            if (code != 105 && code != 106) return;
+            string key = _nav.Press(code, true, Efl.ecore_time_get());
+            if (key != null) _onModeKey(key);
+        }
+
+        private void OnKey(IntPtr data, IntPtr evas, IntPtr obj, IntPtr eventInfo)
+        {
+            try
+            {
+                string key = Marshal.PtrToStringAnsi(Marshal.ReadIntPtr(eventInfo));
+                if (_nav.IsEcho(key, Efl.ecore_time_get())) return;
+                if (!_shown || !_showModes || _onModeKey == null) return;
+                if (key == "Left" || key == "Right") _onModeKey(key);
+            }
+            catch (Exception ex) { _log("volume key: " + ex.Message); }
+        }
+
+        private void GrabModeKeys()
+        {
+            OverlayFlag.Mark(OverlayFlag.VolumePath, true, _log);
+            if (_grabbed || _win == IntPtr.Zero) return;
+            foreach (string k in new[] { "Left", "Right" })
+            {
+                Efl.evas_object_key_grab(_win, k, 0, 0, true);
+                Efl.elm_win_keygrab_set(_win, k, 0, 0, 0, Efl.ElmWinKeygrabTopmost);
+            }
+            _grabbed = true;
+        }
+
+        private void UngrabModeKeys()
+        {
+            OverlayFlag.Mark(OverlayFlag.VolumePath, false, _log);
+            if (!_grabbed || _win == IntPtr.Zero) return;
+            _grabbed = false;
+            foreach (string k in new[] { "Left", "Right" })
+            {
+                Efl.elm_win_keygrab_unset(_win, k, 0, 0);
+                Efl.evas_object_key_ungrab(_win, k, 0, 0);
+            }
         }
 
         private void CancelHold()
@@ -131,11 +209,41 @@ namespace Launcher.Ui
                     Efl.evas_object_pass_events_set(img, true);
                     _icons[i] = img;
                 }
+
+                // Sonos modes capsule below/above the main volume pill (matching 88 px width & dock_bg glass):
+                //   moon
+                //   voice
+                //   <  >
+                _modesBg = Capsule(evas, "dock_bg", Design.ShellSlice, _p.ModesX - ox, _p.ModesY - oy, VolumePlacement.ModesW, VolumePlacement.ModesH);
+                int iOff = (VolumePlacement.ModeBadgeSize - VolumePlacement.ModeIconSize) / 2;
+                double badgeScale = (VolumePlacement.ModeBadgeSize / 2.0) / 36.0;
+
+                _nightBadge = ScaledCapsule(evas, "pill_cap", 36, badgeScale, _p.ModeBadgeX - ox, _p.NightBadgeY - oy, VolumePlacement.ModeBadgeSize, VolumePlacement.ModeBadgeSize);
+                _nightIcon = UiImage(evas, "moon.png", _p.ModeBadgeX + iOff - ox, _p.NightBadgeY + iOff - oy, VolumePlacement.ModeIconSize, VolumePlacement.ModeIconSize);
+
+                _voiceBadge = ScaledCapsule(evas, "pill_cap", 36, badgeScale, _p.ModeBadgeX - ox, _p.VoiceBadgeY - oy, VolumePlacement.ModeBadgeSize, VolumePlacement.ModeBadgeSize);
+                _voiceIcon = UiImage(evas, "voice.png", _p.ModeBadgeX + iOff - ox, _p.VoiceBadgeY + iOff - oy, VolumePlacement.ModeIconSize, VolumePlacement.ModeIconSize);
+
+                _caretLeft = UiImage(evas, "caret-left.png", _p.LeftCaretX - ox, _p.CaretsY - oy, VolumePlacement.ModeCaretSize, VolumePlacement.ModeCaretSize);
+                _caretRight = UiImage(evas, "caret-right.png", _p.RightCaretX - ox, _p.CaretsY - oy, VolumePlacement.ModeCaretSize, VolumePlacement.ModeCaretSize);
+
+                SetModesVisible(false);
+                Efl.evas_object_event_callback_add(_win, Efl.EvasCallbackKeyDown, _keyCb, IntPtr.Zero);
                 _built = true;
                 _log("volume: pill ready");
                 return true;
             }
             catch (Exception ex) { _failed = true; _log("volume: " + ex.Message); return false; }
+        }
+
+        private void SetModesVisible(bool show)
+        {
+            IntPtr[] objs = { _modesBg, _caretLeft, _nightBadge, _nightIcon, _voiceBadge, _voiceIcon, _caretRight };
+            foreach (IntPtr o in objs)
+            {
+                if (o == IntPtr.Zero) continue;
+                if (show) Efl.evas_object_show(o); else Efl.evas_object_hide(o);
+            }
         }
 
         private IntPtr Capsule(IntPtr evas, string name, int border, int x, int y, int w, int h)
@@ -151,6 +259,26 @@ namespace Launcher.Ui
             Efl.evas_object_resize(img, w, h);
             Efl.evas_object_pass_events_set(img, true);
             Efl.evas_object_show(img);
+            return img;
+        }
+
+        private IntPtr ScaledCapsule(IntPtr evas, string name, int border, double scale, int x, int y, int w, int h)
+        {
+            IntPtr img = Capsule(evas, name, border, x, y, w, h);
+            Efl.evas_object_image_border_scale_set(img, scale);
+            return img;
+        }
+
+        private IntPtr UiImage(IntPtr evas, string file, int x, int y, int w, int h)
+        {
+            IntPtr img = Efl.evas_object_image_add(evas);
+            Efl.evas_object_image_file_set(img, Path.Combine(_assets, "ui", file), null);
+            if (Efl.evas_object_image_load_error_get(img) != Efl.EvasLoadErrorNone) _log("volume: ui asset missing " + file);
+            Efl.evas_object_image_filled_set(img, true);
+            Efl.evas_object_image_smooth_scale_set(img, true);
+            Efl.evas_object_move(img, x, y);
+            Efl.evas_object_resize(img, w, h);
+            Efl.evas_object_pass_events_set(img, true);
             return img;
         }
 
@@ -211,6 +339,18 @@ namespace Launcher.Ui
             Efl.evas_object_move(_num, _numBaseX + dx, _numBaseY + dy);
             for (int i = 0; i < _icons.Length; i++)
                 Efl.evas_object_move(_icons[i], _p.IconX - ox + dx, _p.IconY - oy + dy);
+
+            if (_modesBg != IntPtr.Zero)
+            {
+                int iOff = (VolumePlacement.ModeBadgeSize - VolumePlacement.ModeIconSize) / 2;
+                Efl.evas_object_move(_modesBg, _p.ModesX - ox + dx, _p.ModesY - oy + dy);
+                Efl.evas_object_move(_nightBadge, _p.ModeBadgeX - ox + dx, _p.NightBadgeY - oy + dy);
+                Efl.evas_object_move(_nightIcon, _p.ModeBadgeX + iOff - ox + dx, _p.NightBadgeY + iOff - oy + dy);
+                Efl.evas_object_move(_voiceBadge, _p.ModeBadgeX - ox + dx, _p.VoiceBadgeY - oy + dy);
+                Efl.evas_object_move(_voiceIcon, _p.ModeBadgeX + iOff - ox + dx, _p.VoiceBadgeY + iOff - oy + dy);
+                Efl.evas_object_move(_caretLeft, _p.LeftCaretX - ox + dx, _p.CaretsY - oy + dy);
+                Efl.evas_object_move(_caretRight, _p.RightCaretX - ox + dx, _p.CaretsY - oy + dy);
+            }
         }
 
         private void Apply(double a)
@@ -232,6 +372,17 @@ namespace Launcher.Ui
                 if (i == _iconLevel) { Tint(_icons[i], 0xFFFFFF, 0.95 * a); Efl.evas_object_show(_icons[i]); }
                 else Efl.evas_object_hide(_icons[i]);
             }
+
+            if (_showModes && _modesBg != IntPtr.Zero)
+            {
+                Tint(_modesBg, 0xFFFFFF, a);
+                Tint(_nightBadge, _nightOn ? Design.VolumeFillColor : 0xFFFFFF, (_nightOn ? 0.95 : 0.12) * a);
+                Tint(_nightIcon, 0xFFFFFF, (_nightOn ? 0.98 : 0.45) * a);
+                Tint(_voiceBadge, _voiceOn ? Design.VolumeFillColor : 0xFFFFFF, (_voiceOn ? 0.95 : 0.12) * a);
+                Tint(_voiceIcon, 0xFFFFFF, (_voiceOn ? 0.98 : 0.45) * a);
+                Tint(_caretLeft, 0xFFFFFF, 0.55 * a);
+                Tint(_caretRight, 0xFFFFFF, 0.55 * a);
+            }
         }
 
         private static void Tint(IntPtr obj, int rgb, double alpha)
@@ -248,6 +399,7 @@ namespace Launcher.Ui
                 double a = VolumeFade.Alpha(now, _shownAt, _until);
                 if (a <= 0)
                 {
+                    UngrabModeKeys();
                     Efl.evas_object_hide(_win);
                     _shown = false;
                     _animator = IntPtr.Zero;
@@ -265,6 +417,7 @@ namespace Launcher.Ui
             catch (Exception ex)
             {
                 _log("volume tick: " + ex.Message);
+                UngrabModeKeys();
                 _animator = IntPtr.Zero;
                 _shown = false;
                 CancelHold();

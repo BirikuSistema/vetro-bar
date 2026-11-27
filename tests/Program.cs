@@ -90,11 +90,17 @@ namespace Launcher.Tests
                 T.Eq(Catalog.GroupStart(bar), 2, "system group at the end");
                 T.Eq(Catalog.ArrangeBar(Catalog.BuiltIn())[0].AppId, Design.TdtAppId, "built-in Live TV is remapped too");
 
-                var allBar = Catalog.ArrangeAllApps(null, r.Entries);
-                T.Eq(allBar.Length, 4, "tv + app + settings + tvstore in All Apps");
+                var rawAll = Catalog.Parse(
+                    "livetv\tLive TV\tsource:0\n" +
+                    "netflix\tNetflix\tx.netflix\n" +
+                    "disney\tDisney+\tcom.disney.plus\n" +
+                    "apps2samsung-tv-store\tApps2Samsung TV-Store\tA2STVStore.Store\n").Entries;
+                var allBar = Catalog.ArrangeAllApps(rawAll, bar);
+                T.Eq(allBar.Length, 3, "only non-main apps + settings + tvstore in All Apps");
+                T.Eq(allBar[0].Slug, "disney", "app not on main bar is kept in All Apps");
                 T.Eq(allBar[allBar.Length - 2].Slug, "settings", "settings sits on the right of All Apps");
                 T.Eq(allBar[allBar.Length - 1].Slug, "tvstore", "tvstore sits on the right of All Apps");
-                T.Eq(Catalog.GroupStart(allBar), 2, "system group at the end of All Apps");
+                T.Eq(Catalog.GroupStart(allBar), 1, "system group at the end of All Apps");
             });
 
             T.Run("weather: Open-Meteo JSON becomes a temperature and an icon", () =>

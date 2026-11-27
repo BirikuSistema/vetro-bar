@@ -402,14 +402,84 @@ namespace Launcher.Tests
                     CheckPng(Path.Combine(root, "res", "weather", w + ".png"));
                 T.True(!File.Exists(Path.Combine(root, "res", "weather", "rain.png")), "obsolete rain.png removed");
                 T.True(!File.Exists(Path.Combine(root, "res", "weather", "snow.png")), "obsolete snow.png removed");
-                foreach (string ui in new[] {
+                    foreach (string ui in new[] {
                     "gear", "plug", "squares-four", "app-window", "wrench", "storefront", "sliders-horizontal",
                     "cloud-sun", "compass", "arrows-down-up", "thermometer", "clock", "timer", "calendar", "calendar-dots",
-                    "speaker-high", "speaker-slash", "magnifying-glass",
+                    "speaker-high", "speaker-slash", "magnifying-glass", "moon", "voice",
                     "caret-left", "caret-right", "caret-up", "caret-down", "backspace", "check", "x",
                     "map-pin", "television-simple", "house", "switch_on", "switch_off"
                 })
                     CheckPng(Path.Combine(root, "res", "ui", ui + ".png"));
+                foreach (string pad in new[] { "pad_back", "pad_bs", "pad_colors", "pad_colors_dots", "pad_info", "pad_timer", "pad_ttx", "pill_cap" })
+                    CheckPng(Path.Combine(root, "res", pad + ".png"));
+            });
+
+            T.Run("settings controller: clock and units skip Auto and toggle directly from regional default", () =>
+            {
+                Localization.Configure("es_ES.utf8", "ES", null);
+                var s = new Settings();
+                var ctl = new SettingsController(s, Catalog.BuiltInInputs());
+                string unitVal = null, clockVal = null;
+                int unitIdx = -1, clockIdx = -1;
+                for (int i = 0; i < ctl.Rows.Count; i++)
+                {
+                    if (ctl.Rows[i].Id == SettingsItemId.Units) { unitVal = ctl.Rows[i].Value; unitIdx = i; }
+                    if (ctl.Rows[i].Id == SettingsItemId.ClockFormat) { clockVal = ctl.Rows[i].Value; clockIdx = i; }
+                }
+                T.Eq(unitVal, "\u00b0C", "ES defaults directly to Celsius");
+                T.Eq(clockVal, "24 h", "ES defaults directly to 24 h");
+                T.True(ctl.Show(), "show");
+                ctl.Key("Down"); // enters ShowWeather
+                while (ctl.FocusIndex < unitIdx) ctl.Key("Down");
+                ctl.Key("Right");
+                T.Eq(s.Units, 'f', "first Right switches ES Celsius directly to Fahrenheit");
+                T.Eq(ctl.Rows[unitIdx].Value, "\u00b0F", "label becomes °F");
+                ctl.Key("Right");
+                T.Eq(s.Units, 'c', "second Right switches directly back to Celsius without Auto");
+                while (ctl.FocusIndex < clockIdx) ctl.Key("Down");
+                ctl.Key("Right");
+                T.Eq(s.Clock, 12, "first Right switches ES 24h directly to 12h");
+                T.Eq(ctl.Rows[clockIdx].Value, "12 h", "label becomes 12 h");
+                ctl.Key("Left");
+                T.Eq(s.Clock, 24, "Left switches directly back to 24 h without Auto");
+
+                // US regional defaults -> °F and 12 h
+                Localization.Configure("en_US.utf8", "US", null);
+                var sUs = new Settings();
+                var ctlUs = new SettingsController(sUs, Catalog.BuiltInInputs());
+                foreach (var row in ctlUs.Rows)
+                {
+                    if (row.Id == SettingsItemId.Units) T.Eq(row.Value, "\u00b0F", "US defaults to °F");
+                    if (row.Id == SettingsItemId.ClockFormat) T.Eq(row.Value, "12 h", "US defaults to 12 h");
+                }
+                Localization.Configure("es_ES.utf8", "ES", null);
+            });
+
+            T.Run("number pad model & sonos volume geometry: digits, colors, modes capsule", () =>
+            {
+                var pad = new NumberPadModel();
+                T.Eq(pad.Page, NumberPadModel.DigitsPage, "starts on digits page");
+                T.Eq(pad.Key("Return"), PadResult.Typed, "OK on 1 types 1");
+                T.Eq(pad.Key("Right"), PadResult.Moved, "Right moves");
+                T.Eq(pad.Key("Return"), PadResult.Typed, "OK on 2 types 2");
+                T.Eq(pad.Typed, "12", "typed 12");
+                T.Eq(pad.Key("Up"), PadResult.Moved, "Up focuses Done");
+                T.True(pad.OnDone, "OnDone true");
+                T.Eq(pad.Key("Return"), PadResult.Send, "OK on Done sends");
+                string cmd = NumberPadModel.SendCommand("12", "/usr/bin/input_keyevent ");
+                T.True(cmd.Contains("echo 'tune 12' > /tmp/vetro-tuner.ctl"), "routes digits to tuner when live TV active");
+
+                var p = VolumePlacement.For(VolumeEdge.Left, 1920, 1080);
+                T.Eq(p.ModesX, p.BodyX, "modes capsule aligns flush with vertical volume pill");
+                T.Eq(VolumePlacement.ModesW, VolumePlacement.Thickness, "modes capsule matches volume pill width");
+                T.True(p.ModesY == p.BodyY + p.BodyH + VolumePlacement.ModesGap, "modes capsule sits below vertical volume pill");
+                T.True(p.WinY <= p.BodyY && p.WinY + p.WinH >= p.ModesY + VolumePlacement.ModesH, "window encompasses both pill and modes");
+                T.True(p.NightBadgeY < p.VoiceBadgeY && p.VoiceBadgeY < p.CaretsY && p.LeftCaretX < p.RightCaretX, "modes layout stacked vertically with arrows below");
+
+                var cb = new CommandBuffer();
+                var cmds = cb.Feed(System.Text.Encoding.ASCII.GetBytes("pad\n"), 4);
+                T.Eq(cmds.Count, 1, "pad command parsed");
+                T.Eq(cmds[0], Command.Pad, "Command.Pad emitted");
             });
 
             T.Run("dock focus: TDT is index 0 and resetting focus on open starts on TDT", () =>

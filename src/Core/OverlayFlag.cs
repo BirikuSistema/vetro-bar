@@ -12,6 +12,7 @@ namespace Launcher.Core
     {
         public const string DockPath = "/tmp/vetro-dock.open";
         public const string PadPath = "/tmp/vetro-numpad.open";
+        public const string VolumePath = "/tmp/vetro-volume.open";
 
         public static string Pid;
         private static string PidText()

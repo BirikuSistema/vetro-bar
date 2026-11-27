@@ -24,6 +24,7 @@ namespace Launcher
 
         // Delegates handed to native code live in static fields so the GC can never collect them.
         private static readonly Efl.EvasCb KeyCb = OnKey;
+        private static readonly Efl.EvasCb KeyUpCb = OnKeyUp;
         private static readonly Efl.TaskCb AnimCb = OnFrame;
         private static readonly Efl.TaskCb IdleCb = OnIdle;
         private static readonly Efl.FdCb FifoCb = OnFifo;
@@ -34,19 +35,23 @@ namespace Launcher
         private static readonly Efl.TaskCb PremapCb = OnPremap;
         private static readonly Efl.TaskCb ReactivateCb = OnReactivate;
         private static readonly Efl.TaskCb PollAsyncCb = OnPollAsync;
+        private static readonly Efl.TaskCb BackCb = OnBackTick;
         private static readonly Efl.EventCb EcoreKeyCb = OnEcoreKey;
 
         private static readonly CommandBuffer Commands = new CommandBuffer();
         private static readonly NavigationInput Navigation = new NavigationInput();
+        private static readonly BackRelease BackUp = new BackRelease();
         private static readonly AppLauncher LauncherSvc = new AppLauncher();
         private static readonly SonosClient Sonos = new SonosClient();
         private static readonly byte[] ReadBuf = new byte[128];
         private static readonly byte[] SmackStar = { (byte)'*' };
         private const int KeygrabExclusive = 1 << 10;
+        private const int RawBackCode = 1, Raw123Code = 140;
+        private const string KeyTool = "/usr/bin/input_keyevent ";
 
         private static InputWatcher _input;
         private static string _dir, _pidPath, _fifoPath, _confPath, _claimPath, _resDir;
-        private static IntPtr _win, _anim, _idle, _fifoHandler, _clockTimer, _weatherTimer, _weatherSoonTimer, _premapTimer, _reactivateTimer, _pollTimer;
+        private static IntPtr _win, _anim, _idle, _fifoHandler, _clockTimer, _weatherTimer, _weatherSoonTimer, _premapTimer, _reactivateTimer, _pollTimer, _backTimer;
         private static int _reactivateLeft;
         private static int _fifoFd = -1;
         private static double _lastFrame;
@@ -63,9 +68,13 @@ namespace Launcher
         private static SettingsModal _settingsModal;
         private static VolumeEdge _volumeEdge = VolumeEdge.Left;
         private static VolumePill _pill;
+        private static NumberPad _pad;
+        private static bool _padFromDock;
         private static int _trackedVolume = -1;
         private static int _levelBeforeMute;
         private static bool _virtualMuted;
+        private static bool _nightMode;
+        private static bool _voiceMode;
         private static double _lastFifoVolumeAt = -100;
         private static double _lastRawVolumeAt = -100;
         private static double _lastSonosReadAt = -100;
@@ -177,6 +186,7 @@ namespace Launcher
             {
                 OverlayFlag.Mark(OverlayFlag.DockPath, false);
                 OverlayFlag.Mark(OverlayFlag.PadPath, false);
+                OverlayFlag.Mark(OverlayFlag.VolumePath, false);
                 int pid;
                 if (File.Exists(_pidPath) && int.TryParse(File.ReadAllText(_pidPath).Trim(), out pid) && pid == Libc.getpid())
                 {
@@ -206,10 +216,10 @@ namespace Launcher
             return Catalog.ArrangeBar(raw);
         }
 
-        private static AppEntry[] LoadAllApps(string path, AppEntry[] rawApps)
+        private static AppEntry[] LoadAllApps(string path, AppEntry[] mainBarApps)
         {
             AppEntry[] rawAll = File.Exists(path) ? LoadList(path, Catalog.BuiltInAllApps) : null;
-            return Catalog.ArrangeAllApps(rawAll, rawApps);
+            return Catalog.ArrangeAllApps(rawAll, mainBarApps);
         }
 
         private static string FindInstalledApp(params string[] candidates)
@@ -284,6 +294,9 @@ namespace Launcher
         private static void ShowDock()
         {
             if (_homeLaunch != null) return;
+            StopBackWait();
+            ClosePad();
+            if (_pill != null) _pill.ReleaseModeKeys();
             _pendingLaunch = null;
             LauncherSvc.CancelPendingKey();
             if (_ctl != _appsCtl && !_ctl.IsActive) ActivatePage(_appsCtl, _appsDock);
@@ -295,6 +308,7 @@ namespace Launcher
             SoundPlayer.Play(SoundEffect.Open);
             _dock.Apply(_ctl);
             Efl.evas_object_show(_win);
+            Efl.elm_win_raise(_win);
             Efl.elm_win_activate(_win);
             TryClaimHome();
             ScheduleReactivate();
@@ -334,6 +348,7 @@ namespace Launcher
 
         private static void HideDock(bool playSound = true)
         {
+            StopBackWait();
             _pendingLaunch = null;
             _reactivateLeft = 0;
             if (_reactivateTimer != IntPtr.Zero)
@@ -598,7 +613,7 @@ namespace Launcher
                     AppEntry pending = _pendingLaunch;
                     _pendingLaunch = null;
                     if (pending != null) LauncherSvc.Execute(pending);
-                    else LauncherSvc.ResumeTuner("dock closed", false);
+                    else if (_pad == null || !_pad.IsOnScreen) LauncherSvc.ResumeTuner("dock closed", false);
                 }
                 if (_perf) PerfSample(dt, (Stopwatch.GetTimestamp() - t0) * 1000.0 / Stopwatch.Frequency, !(more || moreSet));
                 if (more || moreSet) return 1;
@@ -675,12 +690,80 @@ namespace Launcher
         {
             try
             {
+                if (_pad != null && _pad.IsOnScreen) return;
                 string key = Marshal.PtrToStringAnsi(Marshal.ReadIntPtr(eventInfo));
                 if (Navigation.IsEcho(key, Efl.ecore_time_get())) return;
                 if (_settingsCtl != null && _settingsCtl.IsActive) HandleSettingsKey(key);
                 else HandleKey(key);
             }
             catch (Exception ex) { Logger.Write("key: " + ex); }
+        }
+
+        private static void OnKeyUp(IntPtr data, IntPtr evas, IntPtr obj, IntPtr eventInfo)
+        {
+            try
+            {
+                if (_pad != null && _pad.IsOnScreen) return;
+                string key = Marshal.PtrToStringAnsi(Marshal.ReadIntPtr(eventInfo));
+                if (BackUp.WindowRelease(key)) { StopBackWait(); HideDock(); }
+            }
+            catch (Exception ex) { Logger.Write("key up: " + ex); }
+        }
+
+        private static void OnRawRelease(int code)
+        {
+            try
+            {
+                if (_pad != null && _pad.IsOnScreen)
+                {
+                    _pad.HandleRawRelease(code);
+                    return;
+                }
+                if (code == RawBackCode || code == 158 || code == 174)
+                    BackUp.KernelRelease(Efl.ecore_time_get());
+            }
+            catch (Exception ex) { Logger.Write("raw release: " + ex); }
+        }
+
+        private static byte OnBackTick(IntPtr data)
+        {
+            if (!BackUp.Pending) { _backTimer = IntPtr.Zero; return 0; }
+            if (!BackUp.Due(Efl.ecore_time_get())) return 1;
+            _backTimer = IntPtr.Zero;
+            HideDock();
+            return 0;
+        }
+
+        private static void StopBackWait()
+        {
+            BackUp.Cancel();
+            if (_backTimer != IntPtr.Zero) { Efl.ecore_timer_del(_backTimer); _backTimer = IntPtr.Zero; }
+        }
+
+        private static void ClosePad() { if (_pad != null && _pad.IsShown) _pad.Close(); }
+
+        private static void TogglePad()
+        {
+            if (_pad == null)
+                _pad = new NumberPad(_resDir, Logger.Write, _screenW, _screenH,
+                    delegate (PadResult kind, string what)
+                    {
+                        string cmd = kind == PadResult.Send ? NumberPadModel.SendCommand(what, KeyTool) : NumberPadModel.SendKeyCommand(what, KeyTool);
+                        Logger.Write("pad: sending " + what + " rc=" + Libc.system(cmd));
+                    },
+                    delegate (bool sent)
+                    {
+                        bool fromDock = _padFromDock;
+                        _padFromDock = false;
+                        if (fromDock && !sent && !_dockMapped) LauncherSvc.ResumeTuner("osd 123 closed after the dock");
+                    });
+            bool opening = !_pad.IsShown;
+            if (opening)
+            {
+                _padFromDock = _dockMapped;
+                if (_pill != null) _pill.ReleaseModeKeys();
+            }
+            _pad.Toggle();
         }
 
         private static void OnRawHome()
@@ -737,7 +820,23 @@ namespace Launcher
                 }
                 return;
             }
+            if (_pad != null && _pad.IsOnScreen)
+            {
+                _pad.HandleRawInput(code);
+                return;
+            }
             bool anyActive = _ctl.IsActive || (_settingsCtl != null && _settingsCtl.IsActive);
+            if (!anyActive && _pill != null && _pill.IsOnScreen && _pill.HasSonosModes && (code == 105 || code == 106))
+            {
+                _pill.HandleRawModeKey(code);
+                return;
+            }
+            if (code == Raw123Code && anyActive)
+            {
+                Logger.Write("123 reached the TV: the dock steps aside");
+                HideDock();
+                return;
+            }
             string key = Navigation.Press(code, anyActive, Efl.ecore_time_get());
             if (key != null)
             {
@@ -801,7 +900,11 @@ namespace Launcher
                             LauncherSvc.ArmGuard();
                             break;
                         }
-                        HideDock();
+                        if (BackUp.Press(key, Efl.ecore_time_get()))
+                        {
+                            if (_backTimer == IntPtr.Zero) _backTimer = Efl.ecore_timer_add(0.05, BackCb, IntPtr.Zero);
+                        }
+                        else HideDock();
                         break;
                 }
             }
@@ -821,15 +924,16 @@ namespace Launcher
                         Logger.Write("command " + c);
                         switch (c)
                         {
-                            case Command.Show: _perfWhy = "fifo-show"; ShowDock(); break;
+                            case Command.Show: ClosePad(); _perfWhy = "fifo-show"; ShowDock(); break;
                             case Command.Hide: _perfWhy = "fifo-hide"; HideDock(); break;
-                            case Command.Toggle: _perfWhy = "fifo-toggle"; if (_ctl.IsActive) HideDock(); else ShowDock(); break;
+                            case Command.Toggle: ClosePad(); _perfWhy = "fifo-toggle"; if (_ctl.IsActive) HideDock(); else ShowDock(); break;
                             case Command.VolUp:
                             case Command.VolDown:
                             case Command.VolMute:
                                 _lastFifoVolumeAt = Efl.ecore_time_get();
                                 VolumeKey(c, fromFifo: true);
                                 break;
+                            case Command.Pad: TogglePad(); break;
                             case Command.Rescan:
                                 if (_input != null) _input.Rescan();
                                 break;
@@ -882,10 +986,51 @@ namespace Launcher
             return Efl.vconf_get_int("memory/org.tizen.tv-viewer/mute_status", out v) == 0 && v != 0;
         }
 
+        private static VolumePill EnsurePill()
+        {
+            if (_pill == null)
+                _pill = new VolumePill(_resDir, Logger.Write, _screenW, _screenH, _volumeEdge, OnVolumeModeKey);
+            return _pill;
+        }
+
+        private static bool AllowVolumeModeGrab()
+        {
+            bool dockOrSettings = (_ctl != null && _ctl.IsActive) || (_settingsCtl != null && _settingsCtl.IsActive);
+            bool padOpen = _pad != null && _pad.IsOnScreen;
+            return !dockOrSettings && !padOpen;
+        }
+
+        private static void OnVolumeModeKey(string key)
+        {
+            if (!Sonos.IsAvailable) return;
+            if (key == "Left")
+            {
+                _nightMode = !_nightMode;
+                Sonos.SetNightModeAsync(_nightMode);
+                Logger.Write("sonos: NightMode=" + (_nightMode ? "on" : "off"));
+            }
+            else if (key == "Right")
+            {
+                _voiceMode = !_voiceMode;
+                Sonos.SetDialogLevelAsync(_voiceMode);
+                Logger.Write("sonos: DialogLevel=" + (_voiceMode ? "on" : "off"));
+            }
+            else return;
+
+            SoundPlayer.Play(SoundEffect.Move);
+            if (_volumeEdge == VolumeEdge.Hidden) return;
+            EnsurePill().Show(_trackedVolume < 0 ? 20 : _trackedVolume, _virtualMuted, true, _nightMode, _voiceMode, AllowVolumeModeGrab());
+        }
+
         private static void VolumeKey(Command key, bool fromFifo)
         {
             try
             {
+                // Dismiss any open launcher overlay so focus moves straight to the volume bar & Sonos modes.
+                if (_settingsCtl != null && _settingsCtl.IsActive) CloseSettings(playSound: false);
+                if (_ctl != null && _ctl.IsActive) HideDock(playSound: false);
+                ClosePad();
+
                 int output;
                 bool known = Sound.TryGetSpeakerSelection(out output);
                 bool external = known && Sound.IsExternalOutput(output);
@@ -902,6 +1047,10 @@ namespace Launcher
                             else if (_trackedVolume < 0) _trackedVolume = 20;
                             bool realMute;
                             if (Sonos.TryGetMute(out realMute)) _virtualMuted = realMute;
+                            bool realNight;
+                            if (Sonos.TryGetNightMode(out realNight)) _nightMode = realNight;
+                            bool realVoice;
+                            if (Sonos.TryGetDialogLevel(out realVoice)) _voiceMode = realVoice;
                         }
                         _lastSonosReadAt = now;
 
@@ -922,8 +1071,7 @@ namespace Launcher
                         }
 
                         if (_volumeEdge == VolumeEdge.Hidden) return;
-                        if (_pill == null) _pill = new VolumePill(_resDir, Logger.Write, _screenW, _screenH, _volumeEdge);
-                        _pill.Show(_trackedVolume, _virtualMuted);
+                        EnsurePill().Show(_trackedVolume, _virtualMuted, true, _nightMode, _voiceMode, AllowVolumeModeGrab());
                         return;
                     }
 
@@ -984,9 +1132,8 @@ namespace Launcher
                 }
 
                 if (_volumeEdge == VolumeEdge.Hidden) return;
-                if (_pill == null) _pill = new VolumePill(_resDir, Logger.Write, _screenW, _screenH, _volumeEdge);
                 bool showMuted = (external && _virtualMuted) || (volume == 0 && _levelBeforeMute > 0);
-                _pill.Show(volume, showMuted);
+                EnsurePill().Show(volume, showMuted);
             }
             catch (Exception ex) { Logger.Write("volume: " + ex.Message); }
         }
@@ -1267,7 +1414,7 @@ namespace Launcher
         {
             if (Flag(args, "--get-home")) return GetHome();
             _perf = Flag(args, "--perf");
-            if (Flag(args, "--no-motion")) { Controller.Instant = true; DockLayout.Grow = false; DockLayout.GlowFromIcon = false; }
+            if (Flag(args, "--no-motion")) { Controller.Instant = true; DockLayout.Grow = false; DockLayout.GlowFromIcon = false; PadMotion.Instant = true; VolumeFade.Instant = true; }
             _dir = ResolveDir(args);
             _pidPath = Path.Combine(_dir, "tvlauncher.pid");
             _fifoPath = Path.Combine(_dir, "tvlauncher.fifo");
@@ -1317,7 +1464,7 @@ namespace Launcher
 
                 AppEntry[] rawApps;
                 _apps = LoadApps(Arg(args, "--apps") ?? Path.Combine(res, "apps.tsv"), out rawApps);
-                _allApps = LoadAllApps(Arg(args, "--all-apps") ?? Path.Combine(Weather.CacheDir, "vetro-dock-allapps.tsv"), rawApps);
+                _allApps = LoadAllApps(Arg(args, "--all-apps") ?? Path.Combine(Weather.CacheDir, "vetro-dock-allapps.tsv"), _apps);
                 _inputs = LoadList(Arg(args, "--inputs") ?? Path.Combine(res, "inputs.tsv"), Catalog.BuiltInInputs);
                 ConfigureShortcuts(rawApps);
                 int leftPins = Catalog.LeftPinCount(_apps);
@@ -1372,6 +1519,7 @@ namespace Launcher
                     + (_appsDock.MissingIcons + _allDock.MissingIcons + _inputsDock.MissingIcons) + " icons missing");
 
                 Efl.evas_object_event_callback_add(_win, Efl.EvasCallbackKeyDown, KeyCb, IntPtr.Zero);
+                Efl.evas_object_event_callback_add(_win, Efl.EvasCallbackKeyUp, KeyUpCb, IntPtr.Zero);
                 SetupFifo();
                 LauncherSvc.ConfigureGuard(Arg(args, "--kill-on-home"), _dir);
 
@@ -1382,7 +1530,7 @@ namespace Launcher
                     Logger.Write(_homeLaunch != null ? "home key launches " + homeLaunch + "; the dock is not shown" : "home-launch: bad app id ignored");
                 }
 
-                _input = new InputWatcher(OnRawHome, OnRawHomeBurst, OnRawNav);
+                _input = new InputWatcher(OnRawHome, OnRawHomeBurst, OnRawNav, OnRawRelease);
                 _input.Start(Arg(args, "--home-code") ?? Environment.GetEnvironmentVariable("TVLAUNCHER_HOME_CODE"), Flag(args, "--learn"));
 
                 string fpsArg = Arg(args, "--vblank-fps");

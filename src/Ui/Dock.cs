@@ -353,7 +353,7 @@ namespace Launcher.Ui
             _weatherIcon = Efl.evas_object_image_add(_evas);
             Efl.evas_object_image_filled_set(_weatherIcon, true);
             Efl.evas_object_image_smooth_scale_set(_weatherIcon, true);
-            Efl.evas_object_resize(_weatherIcon, size, size);
+            Efl.evas_object_resize(_weatherIcon, 60, 60);
             Efl.evas_object_show(_weatherIcon);
         }
 
@@ -383,12 +383,15 @@ namespace Launcher.Ui
             string span = Weather.Enabled ? Weather.SubText : null;
             bool have = Weather.Enabled && !string.IsNullOrEmpty(w);
             bool haveSub = have && !string.IsNullOrEmpty(span);
+            int iconGap = 14;
+            int estCapH = (size * 952 / 1024) * 724 / 952;
+            int estIconSize = Math.Max(36, Math.Min(size, estCapH + 4));
             if (w != _weatherShown || span != _spanShown || icon != _iconShown)
             {
                 _weatherShown = w;
                 _spanShown = span;
                 _iconShown = icon;
-                _weatherW = have ? FitLine(_weatherText, w, SideInner() - size - 12, size) : 0;
+                _weatherW = have ? FitLine(_weatherText, w, SideInner() - estIconSize - iconGap, size) : 0;
                 _tempAscent = Efl.evas_object_text_ascent_get(_weatherText);
                 _spanW = haveSub ? FitLine(_weatherSpan, span, SideInner(), Design.SideSubSize) : 0;
                 if (!haveSub) Efl.evas_object_text_text_set(_weatherSpan, "");
@@ -397,8 +400,11 @@ namespace Launcher.Ui
                 _weatherX = int.MinValue;
             }
 
-            int iconGap = 12;
-            int group = have ? size + iconGap + _weatherW : 0;
+            int ascent = _tempAscent > 0 ? _tempAscent : size * 952 / 1024;
+            int tTop = ascent - ascent * 724 / 952;
+            int capH = Math.Max(20, ascent - tTop);
+            int iconSize = Math.Max(36, Math.Min(size, capH + 4));
+            int group = have ? iconSize + iconGap + _weatherW : 0;
             int fixedPillW = SideInner() + 2 * DockLayout.PadX;
             int clockPillW = fixedPillW;
             int weatherPillW = fixedPillW;
@@ -437,17 +443,15 @@ namespace Launcher.Ui
             int pillX = _layout.WeatherMid - weatherPillW / 2 - side;
             Place(_weatherPill, ref _weatherPillBox, SidePillBox(pillX, pillY, weatherPillW, pillH));
             int wx = pillX + (weatherPillW - group) / 2;
-            int ascent = _tempAscent > 0 ? _tempAscent : size * 74 / 80;
-            int tTop = ascent - ascent * 724 / 952;
-            int singleWeatherY = pillY + (pillH - (ascent - tTop)) / 2 - tTop;
+            int singleWeatherY = pillY + (pillH - capH) / 2 - tTop;
             int weatherY = haveSub ? twoLineY : singleWeatherY;
-            int iconY = weatherY + (ascent - size * 36 / 100) - size / 2;
+            int iconY = weatherY + tTop + (capH - iconSize) / 2;
             if (wx != _weatherX || weatherY != _weatherY)
             {
                 _weatherX = wx; _weatherY = weatherY;
                 Efl.evas_object_move(_weatherIcon, wx, iconY);
-                Efl.evas_object_resize(_weatherIcon, size, size);
-                Efl.evas_object_move(_weatherText, wx + size + iconGap, weatherY);
+                Efl.evas_object_resize(_weatherIcon, iconSize, iconSize);
+                Efl.evas_object_move(_weatherText, wx + iconSize + iconGap, weatherY);
                 Efl.evas_object_move(_weatherSpan, pillX + (weatherPillW - _spanW) / 2, subY);
             }
             if (a != _weatherAlpha)
